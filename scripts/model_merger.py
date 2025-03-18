@@ -160,5 +160,5 @@ if __name__ == "__main__":
         from huggingface_hub import HfApi
 
         api = HfApi()
-        api.create_repo(repo_id=args.hf_upload_path, private=False, exist_ok=True)
+        api.create_repo(repo_id=args.hf_upload_path, private=True, exist_ok=True)
         api.upload_folder(folder_path=hf_path, repo_id=args.hf_upload_path, repo_type="model")

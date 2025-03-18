@@ -17,7 +17,7 @@ import torch
 from transformers import PreTrainedTokenizer
 
 from ...protocol import DataProto
-from ...utils.reward_score import math_compute_score, r1v_compute_score
+from ...utils.reward_score import math_compute_score, r1v_compute_score, openr1_compute_score
 
 
 class CustomRewardManager:
@@ -28,6 +28,8 @@ class CustomRewardManager:
             self.compute_score = math_compute_score
         elif compute_score == "r1v":
             self.compute_score = r1v_compute_score
+        elif compute_score == "openr1":
+            self.compute_score = openr1_compute_score
         else:
             raise NotImplementedError()
 
