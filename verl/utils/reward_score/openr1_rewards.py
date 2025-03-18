@@ -198,9 +198,9 @@ def get_cosine_scaled_reward(
         """
         gold_parsed = parse(sol, extraction_mode="first_match", extraction_config=[LatexExtractionConfig()])
         if len(gold_parsed) == 0:
-            rewards.append(1.0)  # Skip unparseable examples
+            reward = 1.0  # Treat as correct to avoid penalizing
             print("Failed to parse gold solution: ", sol)
-            continue
+            return reward
 
         answer_parsed = parse(
             content,
@@ -270,11 +270,11 @@ def get_repetition_penalty_reward(ngram_size: int=40, max_penalty: float=-0.5):
         """
 
         if completion == "":
-            rewards.append(0.0)
-            continue
+            reward = 0.0
+            return reward
         if len(completion.split()) < ngram_size:
-            rewards.append(0.0)
-            continue
+            reward = 0.0
+            return reward
 
         ngrams = set()
         total = 0
