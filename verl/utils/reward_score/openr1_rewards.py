@@ -19,6 +19,8 @@ def accuracy_reward(content, sol, **kwargs):
     )
     if len(gold_parsed) != 0:
         # We require the answer to be provided in correct latex (no malformed operators)
+        content = content.strip()
+        content = re.search(r"<answer>(.*?)</answer>", content, re.DOTALL).group(1).strip()
         answer_parsed = parse(
             content,
             extraction_config=[
