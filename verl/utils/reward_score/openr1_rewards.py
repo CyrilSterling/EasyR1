@@ -8,7 +8,7 @@ from typing import Dict
 
 from latex2sympy2_extended import NormalizationConfig
 from math_verify import LatexExtractionConfig, parse, verify
-from r1v import r1v_format_reward, r1v_accuracy_reward
+from .r1v import r1v_format_reward, r1v_accuracy_reward
 
 
 def accuracy_reward(content, sol, **kwargs):
