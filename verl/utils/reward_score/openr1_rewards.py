@@ -8,6 +8,7 @@ from typing import Dict
 
 from latex2sympy2_extended import NormalizationConfig
 from math_verify import LatexExtractionConfig, parse, verify
+from r1v import r1v_format_reward, r1v_accuracy_reward
 
 
 def accuracy_reward(content, sol, **kwargs):
@@ -299,8 +300,8 @@ def openr1_compute_score(predict_str: str, ground_truth: str, validation: bool =
         predict_str: The completion string
         ground_truth: The ground truth string
     """
-    acc_reward = accuracy_reward(predict_str, ground_truth)
-    format_reward = get_format_reward(predict_str)
+    acc_reward = r1v_accuracy_reward(predict_str, ground_truth, response_length)
+    format_reward = r1v_format_reward(predict_str)
     cosine_len_reward = get_cosine_scaled_reward()(predict_str, ground_truth)
     repetition_penalty_reward = get_repetition_penalty_reward()(predict_str)
     if validation:
