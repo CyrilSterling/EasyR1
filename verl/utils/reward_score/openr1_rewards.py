@@ -53,7 +53,7 @@ def accuracy_reward(content, sol, **kwargs):
 
     return reward
 
-def format_reward(completion_content, **kwargs):
+def get_format_reward(completion_content, **kwargs):
     """Reward function that checks if the reasoning process is enclosed within <think> and </think> tags, while the final answer is enclosed within <answer> and </answer> tags."""
     pattern = r"^<think>\n.*?\n</think>\n<answer>\n.*?\n</answer>$"
     match = re.match(pattern, completion_content, re.DOTALL | re.MULTILINE)
@@ -297,7 +297,7 @@ def openr1_compute_score(predict_str: str, ground_truth: str, validation: bool =
         ground_truth: The ground truth string
     """
     acc_reward = accuracy_reward(predict_str, ground_truth)
-    format_reward = format_reward(predict_str)
+    format_reward = get_format_reward(predict_str)
     cosine_len_reward = get_cosine_scaled_reward()(predict_str, ground_truth)
     repetition_penalty_reward = get_repetition_penalty_reward()(predict_str)
     if validation:
