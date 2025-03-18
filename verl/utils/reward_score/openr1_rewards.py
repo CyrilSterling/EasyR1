@@ -183,7 +183,7 @@ def get_cosine_scaled_reward(
     max_value_correct: float = 1.0,
     max_len: int = 4096,
 ):
-    def cosine_scaled_reward(content, sol, **kwargs):
+    def cosine_scaled_reward(content, sol, acc_reward, **kwargs):
         """Reward function that scales based on completion length using a cosine schedule.
 
         Shorter correct solutions are rewarded more than longer ones.
@@ -200,32 +200,37 @@ def get_cosine_scaled_reward(
             max_value_correct: Maximum reward for correct answers
             max_len: Maximum length for scaling
         """
-        gold_parsed = parse(sol, extraction_mode="first_match", extraction_config=[LatexExtractionConfig()])
-        if len(gold_parsed) == 0:
-            reward = 1.0  # Treat as correct to avoid penalizing
-            print("Failed to parse gold solution: ", sol)
-            return reward
+        # gold_parsed = parse(sol, extraction_mode="first_match", extraction_config=[LatexExtractionConfig()])
+        # if len(gold_parsed) == 0:
+        #     reward = 1.0  # Treat as correct to avoid penalizing
+        #     print("Failed to parse gold solution: ", sol)
+        #     return reward
 
-        answer_parsed = parse(
-            content,
-            extraction_config=[
-                LatexExtractionConfig(
-                    normalization_config=NormalizationConfig(
-                        nits=False,
-                        malformed_operators=False,
-                        basic_latex=True,
-                        equations=True,
-                        boxed=True,
-                        units=True,
-                    ),
-                    boxed_match_priority=0,
-                    try_extract_without_anchor=False,
-                )
-            ],
-            extraction_mode="first_match",
-        )
+        # answer_parsed = parse(
+        #     content,
+        #     extraction_config=[
+        #         LatexExtractionConfig(
+        #             normalization_config=NormalizationConfig(
+        #                 nits=False,
+        #                 malformed_operators=False,
+        #                 basic_latex=True,
+        #                 equations=True,
+        #                 boxed=True,
+        #                 units=True,
+        #             ),
+        #             boxed_match_priority=0,
+        #             try_extract_without_anchor=False,
+        #         )
+        #     ],
+        #     extraction_mode="first_match",
+        # )
 
-        is_correct = verify(answer_parsed, gold_parsed)
+        # is_correct = verify(answer_parsed, gold_parsed)
+        if acc_reward == 1.0:
+            is_correct = True
+        else:
+            is_correct = False
+            
         gen_len = len(content)
 
         # Apply cosine scaling based on length
@@ -302,7 +307,7 @@ def openr1_compute_score(predict_str: str, ground_truth: str, validation: bool =
     """
     acc_reward = r1v_accuracy_reward(predict_str, ground_truth, response_length)
     format_reward = r1v_format_reward(predict_str)
-    cosine_len_reward = get_cosine_scaled_reward()(predict_str, ground_truth)
+    cosine_len_reward = get_cosine_scaled_reward()(predict_str, ground_truth, acc_reward)
     repetition_penalty_reward = get_repetition_penalty_reward()(predict_str)
     if validation:
         reward = acc_reward if acc_reward == 1.0 else 0.0
