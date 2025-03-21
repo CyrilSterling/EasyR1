@@ -128,10 +128,12 @@ def accracy_reward_batch_w_LMM_as_judge(predict_strs, ground_truths, prompt_strs
     # find the index of acc_reward that is not 1.0
     idxs = [i for i, acc_reward in enumerate(acc_rewards) if float(acc_reward) != 1.0]
     message_list = []
+    # process prompt_strs. the question is between \nuser\n and \nassistant\n
+    question_strs = [prompt_str.split("\nuser\n")[1].split("\nassistant\n")[0].strip() for prompt_str in prompt_strs]
     for ind in idxs:
-        message = get_compare_messages(prompt_strs[ind], predict_strs[ind], ground_truths[ind])
+        message = get_compare_messages(question_strs[ind], predict_strs[ind], ground_truths[ind])
         message_list.append(message)
-    gpt_outputs = llm.generate_outputs(message_list)
+    gpt_outputs = llm_client.generate_outputs(message_list)
     for i, gpt_output in enumerate(gpt_outputs):
         # find the content between <judge> and </judge> tags
         if re.search(r"<judge>.*</judge>", gpt_output):
