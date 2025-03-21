@@ -11,6 +11,7 @@ from math_verify import LatexExtractionConfig, parse, verify
 from .r1v import r1v_format_reward, r1v_accuracy_reward
 from .gpt_as_judge import openai_llm, get_compare_messages
 
+from mathruler.grader import extract_boxed_content
 
 def format_reward_batch(completion_contents, **kwargs):
     """Reward function that checks if the reasoning process is enclosed within <think> and </think> tags, while the final answer is enclosed within <answer> and </answer> tags."""
@@ -130,8 +131,12 @@ def accracy_reward_batch_w_LMM_as_judge(predict_strs, ground_truths, prompt_strs
     message_list = []
     # process prompt_strs. the question is between \nuser\n and \nassistant\n
     question_strs = [prompt_str.split("\nuser\n")[1].split("\nassistant\n")[0].strip() for prompt_str in prompt_strs]
+    # process answer_strs.
+    answer_matches = [re.search(r"<answer>(.*?)</answer>", predict_str, re.DOTALL) for predict_str in predict_strs]
+    answer_strs = [answer_match.group(1).strip() if answer_match else predict_str.strip() for answer_match, predict_str in zip(answer_matches, predict_strs)]
+    answer_strs = [extract_boxed_content(answer_str).strip() for answer_str in answer_strs]
     for ind in idxs:
-        message = get_compare_messages(question_strs[ind], predict_strs[ind], ground_truths[ind])
+        message = get_compare_messages(question_strs[ind], answer_strs[ind], ground_truths[ind])
         message_list.append(message)
     gpt_outputs = llm_client.generate_outputs(message_list)
     gpt_corrects_num = 0
