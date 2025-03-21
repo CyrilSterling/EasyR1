@@ -16,6 +16,7 @@
 from .math import math_compute_score
 from .r1v import r1v_compute_score
 from .openr1_rewards import openr1_compute_score
+from .openr1_rewards_batch import openr1_compute_score_batch
 
 
-__all__ = ["math_compute_score", "r1v_compute_score", "openr1_compute_score"]
+__all__ = ["math_compute_score", "r1v_compute_score", "openr1_compute_score", "openr1_compute_score_batch"]

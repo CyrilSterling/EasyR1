@@ -22,3 +22,4 @@ from dataclasses import dataclass
 class RewardConfig:
     reward_type: str = "function"
     compute_score: str = "math"
+    batch_processing: bool = False
