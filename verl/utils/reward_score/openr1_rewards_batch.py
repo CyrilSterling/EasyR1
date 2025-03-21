@@ -134,16 +134,19 @@ def accracy_reward_batch_w_LMM_as_judge(predict_strs, ground_truths, prompt_strs
         message = get_compare_messages(question_strs[ind], predict_strs[ind], ground_truths[ind])
         message_list.append(message)
     gpt_outputs = llm_client.generate_outputs(message_list)
+    gpt_corrects_num = 0
     for i, gpt_output in enumerate(gpt_outputs):
         # find the content between <judge> and </judge> tags
         if re.search(r"<judge>.*</judge>", gpt_output):
             judge_content = re.search(r"<judge>.*</judge>", gpt_output).group()
         else:
-            judge_content = '1'
-        if judge_content.strip() == "0": # judge as correct, replace the reward as 1.0
+            judge_content = "<judge>1</judge>"
+        if judge_content.strip() == "<judge>0</judge>": # judge as correct, replace the reward as 1.0
             acc_rewards[idxs[i]] = 1.0
+            gpt_corrects_num += 1
         else:
             continue
+    print(f"Corrected {gpt_corrects_num}/{len(idxs)} rewards using GPT as judge.")
     return acc_rewards
 
 
