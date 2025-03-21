@@ -133,8 +133,12 @@ def accracy_reward_batch_w_LMM_as_judge(predict_strs, ground_truths, prompt_strs
     question_strs = [prompt_str.split("\nuser\n")[1].split("\nassistant\n")[0].strip() for prompt_str in prompt_strs]
     # process answer_strs.
     answer_matches = [re.search(r"<answer>(.*?)</answer>", predict_str, re.DOTALL) for predict_str in predict_strs]
-    answer_strs = [answer_match.group(1).strip() if answer_match else predict_str.strip() for answer_match, predict_str in zip(answer_matches, predict_strs)]
-    answer_strs = [extract_boxed_content(answer_str).strip() for answer_str in answer_strs]
+    answer_strs_ = [answer_match.group(1).strip() if answer_match else predict_str.strip() for answer_match, predict_str in zip(answer_matches, predict_strs)]
+    answer_strs = []
+    for answer_str in answer_strs_:
+        if "box" in answer_str:
+            answer_str = extract_boxed_content(answer_str).strip()
+        answer_strs.append(answer_str)
     for ind in idxs:
         message = get_compare_messages(question_strs[ind], answer_strs[ind], ground_truths[ind])
         message_list.append(message)
@@ -162,7 +166,7 @@ def openr1_compute_score_batch(predict_strs: list, ground_truths: list, prompt_s
         predict_str: The completion string
         ground_truth: The ground truth string
     """
-    breakpoint()
+    # breakpoint()
     acc_rewards = accracy_reward_batch_w_LMM_as_judge(predict_strs, ground_truths, prompt_strs, response_length)
     format_rewards = format_reward_batch(predict_strs)
     cosine_len_rewards = get_cosine_scaled_reward_batch(max_len=response_length)(predict_strs, ground_truths, acc_rewards)

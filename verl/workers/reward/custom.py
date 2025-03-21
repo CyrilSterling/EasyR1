@@ -40,7 +40,7 @@ class CustomRewardManager:
             raise NotImplementedError()
 
     def batch_process(self, data: DataProto, reward_tensor: torch.Tensor, already_print: int) -> torch.Tensor:
-        breakpoint()
+        # breakpoint()
         prompt_strs = []
         response_strs = []
         ground_truths = []
