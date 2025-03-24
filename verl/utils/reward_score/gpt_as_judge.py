@@ -175,7 +175,7 @@ class openai_llm:
         try:
             response = self.response(messages,**kwargs)
         except Exception as e:
-            response = None
+            response = "<judge>1</judge>" # if failed, return not match
             print(f"get {kwargs.get('model', self.model)} response failed: {e}")
         return response
     
@@ -183,7 +183,7 @@ class openai_llm:
         try:
             response = await self.response_async(messages,**kwargs)
         except Exception as e:
-            response = None
+            response = "<judge>1</judge>" # if failed, return not match
             print(f"get {kwargs.get('model', self.model)} response failed: {e}")
         return idx,response
     
