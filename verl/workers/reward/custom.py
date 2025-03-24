@@ -13,12 +13,19 @@
 # limitations under the License.
 
 
+from collections import defaultdict
+from typing import Any, Callable, Dict, Tuple, TypedDict
+
 import torch
 from transformers import PreTrainedTokenizer
 
 from ...protocol import DataProto
-from ...utils.reward_score import math_compute_score, r1v_compute_score, openr1_compute_score, openr1_compute_score_batch
+from ...utils.reward_score import math_compute_score, r1v_compute_score
 
+class RewardScore(TypedDict):
+    overall: float
+    format: float
+    accuracy: float
 
 class CustomRewardManager:
     def __init__(self, tokenizer: PreTrainedTokenizer, num_examine: int, compute_score: str, validation: bool, response_length: int = None, batch_processing: bool = False):
@@ -28,9 +35,9 @@ class CustomRewardManager:
         self.response_length = response_length
         self.batch_processing = batch_processing
         if compute_score == "math":
-            self.compute_score = math_compute_score
+            self.compute_score: Callable[[str, str], RewardScore] = math_compute_score
         elif compute_score == "r1v":
-            self.compute_score = r1v_compute_score
+            self.compute_score: Callable[[str, str], RewardScore] = r1v_compute_score
         elif compute_score == "openr1":
             if self.batch_processing:
                 self.compute_score = openr1_compute_score_batch
@@ -78,9 +85,10 @@ class CustomRewardManager:
         return reward_tensor
                 
             
-    
-    def __call__(self, data: DataProto) -> torch.Tensor:
+
+    def __call__(self, data: DataProto) -> Tuple[torch.Tensor, Dict[str, Any]]:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_metrics = defaultdict(list)
         already_print = 0
 
         if self.batch_processing:
@@ -103,11 +111,12 @@ class CustomRewardManager:
                 prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
                 response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
-                ground_truth = data_item.non_tensor_batch["ground_truth"]
-                
-                ## TODO: batched compute score for LMM as judge efficiency (try gpt first then vllm deployment)
-                score = self.compute_score(response_str, ground_truth, self.validation, self.response_length)
-                reward_tensor[i, valid_response_length - 1] = score
+            ground_truth = data_item.non_tensor_batch["ground_truth"]
+
+            score = self.compute_score(response_str, ground_truth)
+            reward_tensor[i, valid_response_length - 1] = score["overall"]
+            for key, value in score.items():
+                reward_metrics[key].append(value)
 
                 if already_print < self.num_examine:
                     already_print += 1
@@ -116,4 +125,4 @@ class CustomRewardManager:
                     print("[ground_truth]", ground_truth)
                     print("[score]", score)
 
-            return reward_tensor
+        return reward_tensor, reward_metrics

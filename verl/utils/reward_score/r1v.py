@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import re
-import torch
+from typing import Dict
 
 from mathruler.grader import extract_boxed_content
 from math_verify import parse, verify
@@ -296,7 +296,7 @@ def r1v_accuracy_reward(predict_str: str, ground_truth: str, response_length = N
     return 0.1
 
 
-def r1v_compute_score(predict_str: str, ground_truth: str, validation: bool = False, response_length = None) -> float:
+def r1v_compute_score_(predict_str: str, ground_truth: str, validation: bool = False, response_length = None) -> float:
     acc_reward = r1v_accuracy_reward(predict_str, ground_truth, response_length)
     format_reward = r1v_format_reward(predict_str)
     if validation:
@@ -306,3 +306,12 @@ def r1v_compute_score(predict_str: str, ground_truth: str, validation: bool = Fa
         reward = train_acc_reward * 0.9 + format_reward * 0.1
     # reward /= 2
     return reward
+
+def r1v_compute_score(predict_str: str, ground_truth: str) -> Dict[str, float]:
+    format = r1v_format_reward(predict_str)
+    accuracy = r1v_accuracy_reward(predict_str, ground_truth)
+    return {
+        "overall": 0.5 * accuracy + 0.5 * format,
+        "format": format,
+        "accuracy": accuracy,
+    }
