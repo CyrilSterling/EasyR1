@@ -42,11 +42,12 @@ class CustomRewardManager:
             if self.batch_processing:
                 self.compute_score = openr1_compute_score_batch
             else:
-                self.compute_score = openr1_compute_score
+                # self.compute_score = openr1_compute_score
+                raise NotImplementedError("openr1_compute_score is not adapted to the new channel-wise reward computation, use batch_processing if openr1_reward is needed")
         else:
             raise NotImplementedError()
 
-    def batch_process(self, data: DataProto, reward_tensor: torch.Tensor, already_print: int) -> torch.Tensor:
+    def batch_process(self, data: DataProto, reward_tensor: torch.Tensor, already_print: int, reward_metrics: Dict[str, float]):
         # breakpoint()
         prompt_strs = []
         response_strs = []
@@ -75,14 +76,19 @@ class CustomRewardManager:
         
         scores = self.compute_score(response_strs, ground_truths, prompt_strs, self.validation, self.response_length)
         for i in range(len(data)):
-            reward_tensor[i, valid_response_lengths[i] - 1] = scores[i]
+            reward_tensor[i, valid_response_lengths[i] - 1] = scores[i]["overall"]
+
+            for key, value in scores[i].items():
+                reward_metrics[key].append(value)
+
             if already_print < self.num_examine:
                 already_print += 1
                 print("[prompt]", prompt_strs[i])
                 print("[response]", response_strs[i])
                 print("[ground_truth]", ground_truths[i])
                 print("[score]", scores[i])
-        return reward_tensor
+
+        return reward_tensor, reward_metrics
                 
             
 
@@ -92,7 +98,7 @@ class CustomRewardManager:
         already_print = 0
 
         if self.batch_processing:
-            return self.batch_process(data, reward_tensor, already_print)
+            return self.batch_process(data, reward_tensor, already_print, reward_metrics)
         else:
             for i in range(len(data)):
                 data_item = data[i]  # DataProtoItem
@@ -111,12 +117,12 @@ class CustomRewardManager:
                 prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
                 response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
-            ground_truth = data_item.non_tensor_batch["ground_truth"]
+                ground_truth = data_item.non_tensor_batch["ground_truth"]
 
-            score = self.compute_score(response_str, ground_truth)
-            reward_tensor[i, valid_response_length - 1] = score["overall"]
-            for key, value in score.items():
-                reward_metrics[key].append(value)
+                score = self.compute_score(response_str, ground_truth)
+                reward_tensor[i, valid_response_length - 1] = score["overall"]
+                for key, value in score.items():
+                    reward_metrics[key].append(value)
 
                 if already_print < self.num_examine:
                     already_print += 1
@@ -125,4 +131,4 @@ class CustomRewardManager:
                     print("[ground_truth]", ground_truth)
                     print("[score]", score)
 
-        return reward_tensor, reward_metrics
+            return reward_tensor, reward_metrics

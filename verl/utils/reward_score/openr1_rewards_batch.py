@@ -171,8 +171,19 @@ def openr1_compute_score_batch(predict_strs: list, ground_truths: list, prompt_s
     format_rewards = format_reward_batch(predict_strs)
     cosine_len_rewards = get_cosine_scaled_reward_batch(max_len=response_length)(predict_strs, ground_truths, acc_rewards)
     repetition_penalty_rewards = get_repetition_penalty_reward()(predict_strs)
-    if validation:
-        rewards = acc_rewards
-    else:
-        rewards = [acc_reward + format_reward + cosine_len_reward + repetition_penalty_reward for acc_reward, format_reward, cosine_len_reward, repetition_penalty_reward in zip(acc_rewards, format_rewards, cosine_len_rewards, repetition_penalty_rewards)]
-    return rewards
+    # if validation:
+    #     rewards = acc_rewards
+    # else:
+    #     rewards = [acc_reward + format_reward + cosine_len_reward + repetition_penalty_reward for acc_reward, format_reward, cosine_len_reward, repetition_penalty_reward in zip(acc_rewards, format_rewards, cosine_len_rewards, repetition_penalty_rewards)]
+    # return rewards
+    reward_dicts = []
+    for acc_reward, format_reward, cosine_len_reward, repetition_penalty_reward in zip(acc_rewards, format_rewards, cosine_len_rewards, repetition_penalty_rewards):
+        reward_dict = {
+            "overall": acc_reward + format_reward + cosine_len_reward + repetition_penalty_reward,
+            "accuracy": acc_reward,
+            "format": format_reward,
+            "cosine_len": cosine_len_reward,
+            "repetition_penalty": repetition_penalty_reward
+        }
+        reward_dicts.append(reward_dict)
+    return reward_dicts
