@@ -68,12 +68,12 @@ class Runner:
         }
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
-    reward_fn = CustomRewardManager(
-        tokenizer=tokenizer, num_examine=1, compute_score=config.worker.reward.compute_score, validation=False, response_length=config.data.max_response_length, batch_processing=config.worker.reward.batch_processing
-    )
-    val_reward_fn = CustomRewardManager(
-        tokenizer=tokenizer, num_examine=1, compute_score=config.worker.reward.compute_score, validation=True, response_length=config.data.max_response_length, batch_processing=config.worker.reward.batch_processing
-    )
+        reward_fn = CustomRewardManager(
+            tokenizer=tokenizer, num_examine=1, compute_score=config.worker.reward.compute_score, validation=False, response_length=config.data.max_response_length, batch_processing=config.worker.reward.batch_processing
+        )
+        val_reward_fn = CustomRewardManager(
+            tokenizer=tokenizer, num_examine=1, compute_score=config.worker.reward.compute_score, validation=True, response_length=config.data.max_response_length, batch_processing=config.worker.reward.batch_processing
+        )
 
         trainer = RayPPOTrainer(
             config=config,

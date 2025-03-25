@@ -20,7 +20,7 @@ import torch
 from transformers import PreTrainedTokenizer
 
 from ...protocol import DataProto
-from ...utils.reward_score import math_compute_score, r1v_compute_score
+from ...utils.reward_score import math_compute_score, r1v_compute_score, openr1_compute_score_batch
 
 class RewardScore(TypedDict):
     overall: float
