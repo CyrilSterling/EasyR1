@@ -158,7 +158,11 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             grad_norm = nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.max_grad_norm)
 
-        self.actor_optimizer.step()
+        if not torch.isfinite(grad_norm):
+            print("Gradient norm is not finite. Skip update.")
+        else:
+            self.actor_optimizer.step()
+
         self.actor_optimizer.zero_grad()
         return grad_norm
 
@@ -210,7 +214,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
-        if self.config.use_kl_loss and self.config.kl_coef > 1e-6:
+        if self.config.use_kl_loss and not self.config.disable_kl:
             select_keys.append("ref_log_probs")
 
         if "multi_modal_inputs" in data.non_tensor_batch.keys():
@@ -244,8 +248,6 @@ class DataParallelPPOActor(BasePPOActor):
                     old_log_probs = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
 
-                    clip_ratio = self.config.clip_ratio
-
                     # all return: (bsz, response_length)
                     log_probs = self._forward_micro_batch(model_inputs, temperature=temperature)
 
@@ -254,9 +256,9 @@ class DataParallelPPOActor(BasePPOActor):
                         log_probs=log_probs,
                         advantages=advantages,
                         eos_mask=response_mask,
-                        cliprange=clip_ratio,
+                        cliprange=self.config.clip_ratio,
                     )
-                    if self.config.use_kl_loss and self.config.kl_coef > 1e-6:
+                    if "ref_log_probs" in model_inputs:
                         ref_log_probs = model_inputs["ref_log_probs"]
                         # compute kl loss
                         kld = core_algos.kl_penalty(
