@@ -22,8 +22,8 @@ def format_reward_batch(completion_contents, **kwargs):
 def get_cosine_scaled_reward_batch(
     min_value_wrong: float = -1.0,
     max_value_wrong: float = -0.5,
-    min_value_correct: float = 0.5,
-    max_value_correct: float = 1.0,
+    min_value_correct: float = 0.0, # min_value_correct: float = 0.5
+    max_value_correct: float = 0.0, # max_value_correct: float = 1.0
     max_len: int = 2048,
 ):
     def cosine_scaled_reward(completions, solution, acc_rewards, **kwargs):
