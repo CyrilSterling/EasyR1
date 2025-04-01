@@ -28,9 +28,8 @@ class RewardScore(TypedDict):
     accuracy: float
 
 class CustomRewardManager:
-    def __init__(self, tokenizer: PreTrainedTokenizer, num_examine: int, compute_score: str, validation: bool, response_length: int = None, batch_processing: bool = False):
+    def __init__(self, tokenizer: PreTrainedTokenizer, compute_score: str, validation: bool, response_length: int = None, batch_processing: bool = False):
         self.tokenizer = tokenizer
-        self.num_examine = num_examine
         self.validation = validation
         self.response_length = response_length
         self.batch_processing = batch_processing
@@ -47,7 +46,30 @@ class CustomRewardManager:
         else:
             raise NotImplementedError()
 
-    def batch_process(self, data: DataProto, reward_tensor: torch.Tensor, already_print: int, reward_metrics: Dict[str, float]):
+    def __call__(self, data: DataProto) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_metrics = defaultdict(list)
+
+        if not self.batch_processing:
+            for i in range(len(data)):
+                data_item = data[i]  # DataProtoItem
+                response_ids = data_item.batch["responses"]
+                response_mask = data_item.batch["response_mask"]
+                valid_response_length = response_mask.sum()
+                valid_response_ids = response_ids[:valid_response_length]
+
+                response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+                ground_truth = data_item.non_tensor_batch["ground_truth"]
+
+                score = self.compute_score(response_str, ground_truth)
+                reward_tensor[i, valid_response_length - 1] = score["overall"]
+                for key, value in score.items():
+                    reward_metrics[key].append(value)
+            return reward_tensor, reward_metrics
+        else:
+            return self.batch_process(data, reward_tensor, reward_metrics)
+
+    def batch_process(self, data: DataProto, reward_tensor: torch.Tensor, reward_metrics: Dict[str, float]):
         # breakpoint()
         prompt_strs = []
         response_strs = []
@@ -63,7 +85,8 @@ class CustomRewardManager:
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
             
             response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            response_mask = data_item.batch["response_mask"]
+            valid_response_length = response_mask.sum()
             valid_response_ids = response_ids[:valid_response_length]
             
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
@@ -81,44 +104,5 @@ class CustomRewardManager:
             for key, value in scores[i].items():
                 reward_metrics[key].append(value)
 
-            if already_print < self.num_examine:
-                already_print += 1
-                print("[prompt]", prompt_strs[i])
-                print("[response]", response_strs[i])
-                print("[ground_truth]", ground_truths[i])
-                print("[score]", scores[i])
-
         return reward_tensor, reward_metrics
                 
-            
-
-    def __call__(self, data: DataProto) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        reward_metrics = defaultdict(list)
-        already_print = 0
-
-        if self.batch_processing:
-            return self.batch_process(data, reward_tensor, already_print, reward_metrics)
-        else:
-            for i in range(len(data)):
-                data_item = data[i]  # DataProtoItem
-                response_ids = data_item.batch["responses"]
-                response_mask = data_item.batch["response_mask"]
-                valid_response_length = response_mask.sum()
-                valid_response_ids = response_ids[:valid_response_length]
-
-                response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-                ground_truth = data_item.non_tensor_batch["ground_truth"]
-                score = self.compute_score(response_str, ground_truth)
-                reward_tensor[i, valid_response_length - 1] = score["overall"]
-                for key, value in score.items():
-                    reward_metrics[key].append(value)
-
-                if already_print < self.num_examine:
-                    already_print += 1
-                    print("[prompt]", prompt_str)
-                    print("[response]", response_str)
-                    print("[ground_truth]", ground_truth)
-                    print("[score]", score)
-
-        return reward_tensor, reward_metrics
