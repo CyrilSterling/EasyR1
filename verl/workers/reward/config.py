@@ -15,7 +15,8 @@
 Reward config
 """
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict
 
 
 @dataclass
@@ -23,4 +24,4 @@ class RewardConfig:
     reward_type: str = "function"
     compute_score: str = "math"
     batch_processing: bool = False
-    cos_len_reward_config: list = [-1.0,-0.5,0.5,1.0]
+    cos_len_reward_config: Dict[str, Any] = field(default_factory=dict)

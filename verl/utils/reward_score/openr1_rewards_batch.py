@@ -175,7 +175,7 @@ def openr1_compute_score_batch(predict_strs: list, ground_truths: list, prompt_s
     # breakpoint()
     acc_rewards = accuracy_reward_batch_w_LMM_as_judge(predict_strs, ground_truths, prompt_strs, response_length)
     format_rewards = format_reward_batch(predict_strs)
-    cosine_len_rewards = get_cosine_scaled_reward_batch(min_value_wrong=cos_len_reward_config[0], max_value_wrong=cos_len_reward_config[1], min_value_correct=cos_len_reward_config[2], max_value_correct=cos_len_reward_config[3], max_len=response_length)(predict_strs, ground_truths, acc_rewards)
+    cosine_len_rewards = get_cosine_scaled_reward_batch(min_value_wrong=cos_len_reward_config['min_value_wrong'], max_value_wrong=cos_len_reward_config['max_value_wrong'], min_value_correct=cos_len_reward_config['min_value_correct'], max_value_correct=cos_len_reward_config['max_value_correct'], max_len=response_length)(predict_strs, ground_truths, acc_rewards)
     repetition_penalty_rewards = get_repetition_penalty_reward()(predict_strs)
     # if validation:
     #     rewards = acc_rewards
@@ -204,7 +204,7 @@ def openr1_compute_score_batch_wo_LMM(predict_strs: list, ground_truths: list, p
     # breakpoint()
     acc_rewards = accuracy_reward_batch_wo_LMM(predict_strs, ground_truths, prompt_strs, response_length)
     format_rewards = format_reward_batch(predict_strs)
-    cosine_len_rewards = get_cosine_scaled_reward_batch(min_value_wrong=cos_len_reward_config[0], max_value_wrong=cos_len_reward_config[1], min_value_correct=cos_len_reward_config[2], max_value_correct=cos_len_reward_config[3], max_len=response_length)(predict_strs, ground_truths, acc_rewards)
+    cosine_len_rewards = get_cosine_scaled_reward_batch(min_value_wrong=cos_len_reward_config['min_value_wrong'], max_value_wrong=cos_len_reward_config['max_value_wrong'], min_value_correct=cos_len_reward_config['min_value_correct'], max_value_correct=cos_len_reward_config['max_value_correct'], max_len=response_length)(predict_strs, ground_truths, acc_rewards)    
     repetition_penalty_rewards = get_repetition_penalty_reward()(predict_strs)
     reward_dicts = []
     for acc_reward, format_reward, cosine_len_reward, repetition_penalty_reward in zip(acc_rewards, format_rewards, cosine_len_rewards, repetition_penalty_rewards):
