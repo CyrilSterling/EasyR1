@@ -20,7 +20,7 @@ import torch
 from transformers import PreTrainedTokenizer
 
 from ...protocol import DataProto
-from ...utils.reward_score import math_compute_score, r1v_compute_score, openr1_compute_score_batch
+from ...utils.reward_score import math_compute_score, r1v_compute_score, openr1_compute_score_batch, openr1_compute_score_batch_wo_LMM
 
 class RewardScore(TypedDict):
     overall: float
@@ -28,11 +28,12 @@ class RewardScore(TypedDict):
     accuracy: float
 
 class CustomRewardManager:
-    def __init__(self, tokenizer: PreTrainedTokenizer, compute_score: str, validation: bool, response_length: int = None, batch_processing: bool = False):
+    def __init__(self, tokenizer: PreTrainedTokenizer, compute_score: str, validation: bool, response_length: int = None, batch_processing: bool = False, cos_len_reward_config: list = None):
         self.tokenizer = tokenizer
         self.validation = validation
         self.response_length = response_length
         self.batch_processing = batch_processing
+        self.cos_len_reward_config = cos_len_reward_config
         if compute_score == "math":
             self.compute_score: Callable[[str, str], RewardScore] = math_compute_score
         elif compute_score == "r1v":
@@ -43,6 +44,11 @@ class CustomRewardManager:
             else:
                 # self.compute_score = openr1_compute_score
                 raise NotImplementedError("openr1_compute_score is not adapted to the new channel-wise reward computation, use batch_processing if openr1_reward is needed")
+        elif compute_score == "openr1_wo_LMM":
+            if self.batch_processing:
+                self.compute_score = openr1_compute_score_batch_wo_LMM
+            else:
+                raise NotImplementedError("openr1_compute_score_wo_LMM is not adapted to the new channel-wise reward computation, use batch_processing if openr1_reward is needed")
         else:
             raise NotImplementedError()
 
@@ -97,7 +103,7 @@ class CustomRewardManager:
             ground_truths.append(data_item.non_tensor_batch["ground_truth"])
             valid_response_lengths.append(valid_response_length)
         
-        scores = self.compute_score(response_strs, ground_truths, prompt_strs, self.validation, self.response_length)
+        scores = self.compute_score(response_strs, ground_truths, prompt_strs, self.validation, self.response_length, self.cos_len_reward_config)
         for i in range(len(data)):
             reward_tensor[i, valid_response_lengths[i] - 1] = scores[i]["overall"]
 
