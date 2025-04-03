@@ -1,6 +1,6 @@
 data:
   train_files: /mnt/ai4sci_develop_hz/sicong/EasyR1_official/data/Sicong/RL_toy_math_5@train
-  val_files: /mnt/ai4sci_develop_hz/sicong/EasyR1/data/Sicong/GRPO_val_benchmark
+  val_files: /mnt/ai4sci_develop_hz/sicong/EasyR1_official/data/Sicong/RL_toy_math_5@validation #/mnt/ai4sci_develop_hz/sicong/EasyR1/data/Sicong/GRPO_val_benchmark
   prompt_key: problem
   answer_key: answer
   image_key: images
