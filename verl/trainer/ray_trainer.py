@@ -26,11 +26,15 @@ from enum import Enum, IntEnum, auto
 from typing import Any, Callable, Dict, List, Optional, Type
 
 import numpy as np
+import nltk
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from nltk.util import ngrams
+from Levenshtein import distance
 import ray
 import torch
 from codetiming import Timer
 from ray.experimental.tqdm_ray import tqdm
-from torch.utils.data import RandomSampler, SequentialSampler
+from torch.utils.data import RandomSampler, SequentialSampler, WeightedRandomSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
@@ -196,6 +200,79 @@ def _timer(name: str, timing_raw: Dict[str, float]):
     timing_raw[name] = timer.last
 
 
+class CurriculumWeightedSampler(WeightedRandomSampler):
+    """Custom weighted sampler that supports dynamic weight updates."""
+    
+    def __init__(self, weights, num_samples, replacement=True, generator=None):
+        super().__init__(weights, num_samples, replacement, generator)
+        self.weights = weights
+        
+    def update_weights(self, new_weights):
+        """Update the sampling weights."""
+        self.weights = new_weights
+
+
+class MixedCurriculumSampler(torch.utils.data.Sampler):
+    """Custom sampler that mixes random and weighted sampling."""
+    
+    def __init__(self, dataset, weights, batch_size, mixture_ratio=0.5, replacement=True, generator=None):
+        self.dataset = dataset
+        self.weights = weights
+        self.batch_size = batch_size
+        self.mixture_ratio = mixture_ratio
+        self.replacement = replacement
+        self.generator = generator
+        
+        # Calculate number of samples for each type
+        self.n_weighted = int(batch_size * mixture_ratio)
+        self.n_random = batch_size - self.n_weighted
+        
+        # Create separate samplers for each type
+        self.weighted_sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=self.n_weighted,
+            replacement=replacement,
+            generator=generator
+        )
+        
+        self.random_sampler = RandomSampler(
+            data_source=dataset,
+            replacement=replacement,
+            generator=generator
+        )
+        
+    def __iter__(self):
+        # Get indices from both samplers
+        weighted_indices = list(self.weighted_sampler)
+        random_indices = list(self.random_sampler)
+        
+        # Mix the indices
+        mixed_indices = []
+        for i in range(len(weighted_indices)):
+            mixed_indices.append(weighted_indices[i])
+            if i < len(random_indices):
+                mixed_indices.append(random_indices[i])
+        
+        # Add remaining random indices if any
+        if len(random_indices) > len(weighted_indices):
+            mixed_indices.extend(random_indices[len(weighted_indices):])
+        
+        return iter(mixed_indices)
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def update_weights(self, new_weights):
+        """Update the sampling weights."""
+        self.weights = new_weights
+        self.weighted_sampler = WeightedRandomSampler(
+            weights=new_weights,
+            num_samples=self.n_weighted,
+            replacement=self.replacement,
+            generator=self.generator
+        )
+
+
 class RayPPOTrainer:
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
@@ -212,6 +289,7 @@ class RayPPOTrainer:
         reward_fn: Callable = None,
         val_reward_fn: Callable = None,
     ):
+        breakpoint()
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
@@ -254,9 +332,14 @@ class RayPPOTrainer:
         if self.use_critic and config.data.rollout_batch_size % config.worker.critic.global_batch_size != 0:
             raise ValueError("Rollout batch size must be divisible by global batch size.")
 
+        # Initialize workers first
+        self.init_workers()
+        
+        # Then create dataloader which depends on workers
         self._create_dataloader()
 
     def _create_dataloader(self) -> None:
+        breakpoint()
         self.train_dataset = RLHFDataset(
             data_path=self.config.data.train_files,
             tokenizer=self.tokenizer,
@@ -270,12 +353,28 @@ class RayPPOTrainer:
             min_pixels=self.config.data.min_pixels,
             max_pixels=self.config.data.max_pixels,
         )
-        # use sampler for better ckpt resume
-        if self.config.data.shuffle:
+        
+        # Initialize sampler based on configured strategy
+        if self.config.data.sampling_strategy == "curriculum":
+            # Initialize curriculum learning weights
+            breakpoint()
+            self._init_curriculum_weights()
+            
+            # Create mixed curriculum sampler
+            self.curriculum_sampler = MixedCurriculumSampler(
+                dataset=self.train_dataset,
+                weights=self.curriculum_weights,
+                batch_size=self.config.data.rollout_batch_size,
+                mixture_ratio=self.config.data.curriculum_mixture_ratio,
+                replacement=True,  # Always use replacement for weighted sampling
+                generator=torch.Generator().manual_seed(self.config.data.seed)
+            )
+            sampler = self.curriculum_sampler
+        elif self.config.data.sampling_strategy == "shuffle":
             train_dataloader_generator = torch.Generator()
             train_dataloader_generator.manual_seed(self.config.data.seed)
             sampler = RandomSampler(data_source=self.train_dataset, generator=train_dataloader_generator)
-        else:
+        else:  # sequential
             sampler = SequentialSampler(data_source=self.train_dataset)
 
         self.train_dataloader = StatefulDataLoader(
@@ -327,6 +426,158 @@ class RayPPOTrainer:
         self.config.worker.actor.optim.training_steps = training_steps
         self.config.worker.critic.optim.training_steps = training_steps
         print(f"Total training steps: {self.training_steps}")
+
+    def _calculate_curriculum_metric(self, batch: DataProto) -> torch.Tensor:
+        """Calculate the curriculum learning metric based on the configured strategy."""
+        breakpoint()
+        batch_size = len(batch.batch)
+        if self.config.data.curriculum_metric == "difficulty":
+            # Generate responses for the batch
+            gen_batch = batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=["raw_prompt_ids"],
+            )
+            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+            batch = batch.union(gen_batch_output)
+            
+            # Compute rewards for the batch
+            reward_tensor, _ = self.reward_fn(batch) ## shape is (batch_size*n, max_len)
+            # reshape to (batch_size, n, max_len)
+            reward_tensor = reward_tensor.view(batch_size, self.config.worker.rollout.n, -1)
+            
+            # Sequence-level average rewards over rollouts
+            return reward_tensor.mean(dim=-1).mean(dim=-1)
+
+        elif self.config.data.curriculum_metric == "learnability":
+            # Generate responses for the batch
+            gen_batch = batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=["raw_prompt_ids"],
+            )
+            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+            batch = batch.union(gen_batch_output)
+            
+            # Compute rewards for the batch
+            reward_tensor, _ = self.reward_fn(batch)
+            # reshape to (batch_size, n, max_len)
+            reward_tensor = reward_tensor.view(batch_size, self.config.worker.rollout.n, -1)
+            
+            # Calculate pass rate and learnability
+            pass_rate = reward_tensor.mean(dim=-1).mean(dim=-1)  # sequence-level average over rollouts
+            learnability = pass_rate * (1 - pass_rate)
+            return learnability
+        
+        elif self.config.data.curriculum_metric == "distinct_3":
+            # Generate responses for the batch
+            gen_batch = batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=["raw_prompt_ids"],
+            )
+            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+            batch = batch.union(gen_batch_output)
+            
+            # Get tokenized sequences
+            tokenized_sequences = gen_batch_output.batch["responses"].tolist() ## batch_size*n
+            
+            # Calculate distinct-3 score for each question using n rollouts
+            distinct_score = []
+            for i in range(batch_size):
+                distinct_score.append(calculate_distinct_n(tokenized_sequences[i*self.config.worker.rollout.n:(i+1)*self.config.worker.rollout.n], n=3))
+            return torch.tensor(distinct_score, dtype=torch.float32)
+            
+        elif self.config.data.curriculum_metric == "self_bleu_123":
+            # Generate responses for the batch
+            gen_batch = batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=["raw_prompt_ids"],
+            )
+            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+            batch = batch.union(gen_batch_output)
+            
+            # Get tokenized sequences
+            tokenized_sequences = gen_batch_output.batch["responses"].tolist()
+            
+            # Calculate self-BLEU-123 score
+            bleu_score = []
+            for i in range(batch_size):
+                bleu_score.append(calculate_self_bleu_123(tokenized_sequences[i*self.config.worker.rollout.n:(i+1)*self.config.worker.rollout.n]))
+            return torch.tensor(bleu_score, dtype=torch.float32)
+        
+        elif self.config.data.curriculum_metric == "edit_distance":
+            # Generate responses for the batch
+            gen_batch = batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=["raw_prompt_ids"],
+            )
+            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+            batch = batch.union(gen_batch_output)
+            
+            # Get tokenized sequences
+            tokenized_sequences = gen_batch_output.batch["responses"].tolist()
+            
+            # Calculate edit distance
+            edit_score = []
+            for i in range(batch_size):
+                edit_score.append(calculate_pairwise_edit_distance(tokenized_sequences[i*self.config.worker.rollout.n:(i+1)*self.config.worker.rollout.n]))
+            return torch.tensor(edit_score, dtype=torch.float32)
+
+        elif self.config.data.curriculum_metric == "entropy":
+            # Generate responses for the batch
+            gen_batch = batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=["raw_prompt_ids"],
+            )
+            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+            batch = batch.union(gen_batch_output)
+            
+            # Get log probabilities and calculate entropy
+            log_probs = self.actor_rollout_wg.compute_log_probs(batch)
+            entropy = -torch.sum(torch.exp(log_probs) * log_probs, dim=-1)
+            return entropy.mean(dim=-1)  # average over rollouts
+
+        else:
+            raise ValueError(f"Unknown curriculum metric: {self.config.data.curriculum_metric}")
+
+    def _init_curriculum_weights(self) -> None:
+        """Initialize curriculum learning weights for each sample in the dataset."""
+        # Create a temporary dataloader for initial weight estimation
+        breakpoint()
+        temp_dataloader = StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=self.config.data.rollout_batch_size,
+            shuffle=False,
+            num_workers=8,
+            collate_fn=collate_fn,
+            pin_memory=False,
+            drop_last=False,
+        )
+        
+        # Initialize weights tensor
+        self.curriculum_weights = torch.ones(len(self.train_dataset), dtype=torch.float32)
+        
+        # Estimate initial weights
+        for batch_idx, batch_dict in enumerate(temp_dataloader):
+            batch = DataProto.from_single_dict(batch_dict)
+            
+            # Calculate curriculum metric
+            metric_values = self._calculate_curriculum_metric(batch) ## shape should be (batch_size, )
+            
+            # Store the metric values as weights
+            start_idx = batch_idx * self.config.data.rollout_batch_size
+            end_idx = min(start_idx + self.config.data.rollout_batch_size, len(self.train_dataset))
+            self.curriculum_weights[start_idx:end_idx] = metric_values.detach()
+        
+        # Normalize weights to sum to 1
+        self.curriculum_weights = self.curriculum_weights / self.curriculum_weights.sum()
+        
+        # Store weights in dataset for access during training
+        self.train_dataset.curriculum_weights = self.curriculum_weights
 
     def _maybe_log_val_generations(self, inputs: List[str], outputs: List[str], scores: List[float]) -> None:
         """Log a table of validation samples"""
@@ -526,6 +777,48 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _update_curriculum_weights(self) -> None:
+        """Update curriculum learning weights based on current model performance."""
+        # Create a temporary dataloader for weight estimation
+        breakpoint()
+        temp_dataloader = StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=self.config.data.rollout_batch_size,
+            shuffle=False,
+            num_workers=8,
+            collate_fn=collate_fn,
+            pin_memory=False,
+            drop_last=False,
+        )
+        
+        # Initialize new weights tensor
+        new_weights = torch.zeros_like(self.curriculum_weights)
+        
+        # Estimate new weights
+        for batch_idx, batch_dict in enumerate(temp_dataloader):
+            batch = DataProto.from_single_dict(batch_dict)
+            
+            # Calculate curriculum metric
+            metric_values = self._calculate_curriculum_metric(batch)
+            
+            # Store the metric values as new weights
+            start_idx = batch_idx * self.config.data.rollout_batch_size
+            end_idx = min(start_idx + self.config.data.rollout_batch_size, len(self.train_dataset))
+            new_weights[start_idx:end_idx] = metric_values.detach()
+        
+        # Normalize new weights
+        new_weights = new_weights / new_weights.sum()
+        
+        # Update weights with configured momentum
+        momentum = self.config.data.curriculum_momentum
+        self.curriculum_weights = momentum * self.curriculum_weights + (1 - momentum) * new_weights
+        
+        # Update sampler weights
+        self.curriculum_sampler.update_weights(self.curriculum_weights)
+        
+        # Store updated weights in dataset
+        self.train_dataset.curriculum_weights = self.curriculum_weights
+
     def fit(self):
         """
         The training loop of PPO.
@@ -540,14 +833,13 @@ class RayPPOTrainer:
         self._load_checkpoint()
 
         # perform validation before training
-        # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.val_before_train:
             val_metrics = self._validate()
             self.logger.log(data=val_metrics, step=self.global_step)
             if self.config.trainer.val_only:
                 return
 
-        for _ in tqdm(range(self.config.trainer.total_episodes), desc="Episode", position=0):
+        for epoch in tqdm(range(self.config.trainer.total_episodes), desc="Episode", position=0):
             for batch_dict in tqdm(self.train_dataloader, desc="Running step", position=1):
                 self.global_step += 1
                 if self.global_step > self.training_steps:
@@ -681,6 +973,22 @@ class RayPPOTrainer:
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
 
+                    # Update curriculum weights if configured for step-level updates
+                    if (self.config.data.sampling_strategy == "curriculum" and 
+                        self.config.data.curriculum_update_freq > 0 and 
+                        self.global_step % self.config.data.curriculum_update_freq == 0):
+                        with _timer("update_curriculum", timing_raw):
+                            self._update_curriculum_weights()
+                            
+                            # Log curriculum learning metrics
+                            curriculum_metrics = {
+                                "curriculum/mean_weight": self.curriculum_weights.mean().item(),
+                                "curriculum/std_weight": self.curriculum_weights.std().item(),
+                                "curriculum/min_weight": self.curriculum_weights.min().item(),
+                                "curriculum/max_weight": self.curriculum_weights.max().item(),
+                            }
+                            metrics.update(curriculum_metrics)
+
                 # collect metrics
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
@@ -688,6 +996,21 @@ class RayPPOTrainer:
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
                 self.logger.log(data=metrics, step=self.global_step)
+
+            # Update curriculum weights at the end of each epoch if configured for epoch-level updates
+            if (self.config.data.sampling_strategy == "curriculum" and 
+                self.config.data.curriculum_update_freq == 0):
+                with _timer("update_curriculum", timing_raw):
+                    self._update_curriculum_weights()
+                    
+                    # Log curriculum learning metrics
+                    curriculum_metrics = {
+                        "curriculum/mean_weight": self.curriculum_weights.mean().item(),
+                        "curriculum/std_weight": self.curriculum_weights.std().item(),
+                        "curriculum/min_weight": self.curriculum_weights.min().item(),
+                        "curriculum/max_weight": self.curriculum_weights.max().item(),
+                    }
+                    self.logger.log(data=curriculum_metrics, step=self.global_step)
 
         # perform validation after training
         if self.val_reward_fn is not None:
@@ -703,3 +1026,60 @@ class RayPPOTrainer:
 
         if self.config.trainer.save_freq <= 0 or self.global_step % self.config.trainer.save_freq != 0:
             self._save_checkpoint()
+
+def calculate_distinct_n(tokenized_sequences, n):
+    """Calculate distinct-n metric using model's tokenized sequences."""
+    all_ngrams = []
+    for seq in tokenized_sequences:
+        all_ngrams.extend(list(zip(*[seq[i:] for i in range(n)])))
+    
+    if not all_ngrams:
+        return 0.0
+    
+    unique_ngrams = set(all_ngrams)
+    return len(unique_ngrams) / len(all_ngrams)
+
+def calculate_self_bleu_n(tokenized_sequences, n):
+    """Calculate self-BLEU score for specific n-gram using model's tokenized sequences."""
+    if len(tokenized_sequences) < 2:
+        return 0.0
+    
+    weights = tuple([1.0] if n == 1 else [0.0] * (n-1) + [1.0])  # Only use n-gram
+    scores = []
+    
+    for i, hyp in enumerate(tokenized_sequences):
+        refs = tokenized_sequences[:i] + tokenized_sequences[i+1:]
+        score = sentence_bleu(refs, hyp, weights=weights,
+                            smoothing_function=SmoothingFunction().method1)
+        scores.append(score)
+    
+    return np.mean(scores)
+
+def calculate_self_bleu_123(tokenized_sequences):
+    """Calculate self-BLEU-123 score with uniform weights using model's tokenized sequences."""
+    if len(tokenized_sequences) < 2:
+        return 0.0
+    
+    weights = (1/3, 1/3, 1/3)  # Uniform weights for 1,2,3-grams
+    scores = []
+    
+    for i, hyp in enumerate(tokenized_sequences):
+        refs = tokenized_sequences[:i] + tokenized_sequences[i+1:]
+        score = sentence_bleu(refs, hyp, weights=weights,
+                            smoothing_function=SmoothingFunction().method1)
+        scores.append(score)
+    
+    return np.mean(scores)
+
+def calculate_pairwise_edit_distance(tokenized_sequences):
+    """Calculate average pairwise edit distance between all tokenized sequences."""
+    if len(tokenized_sequences) < 2:
+        return 0.0
+    
+    distances = []
+    for i in range(len(tokenized_sequences)):
+        for j in range(i+1, len(tokenized_sequences)):
+            dist = distance(tokenized_sequences[i], tokenized_sequences[j])
+            distances.append(dist)
+    
+    return np.mean(distances) if distances else 0.0

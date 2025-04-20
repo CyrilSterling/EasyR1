@@ -34,6 +34,7 @@ class Runner:
     """A runner for RL training."""
 
     def run(self, config: PPOConfig):
+        breakpoint()
         # print config
         config.deep_post_init()
         print(json.dumps(config.to_dict(), indent=2))
@@ -85,7 +86,6 @@ class Runner:
             reward_fn=reward_fn,
             val_reward_fn=val_reward_fn,
         )
-        trainer.init_workers()
         trainer.fit()
 
 

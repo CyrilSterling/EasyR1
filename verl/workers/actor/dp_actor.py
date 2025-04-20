@@ -66,6 +66,7 @@ class DataParallelPPOActor(BasePPOActor):
         Returns:
             log_probs: # (bs, response_len)
         """
+        breakpoint()
         input_ids = micro_batch["input_ids"]
         batch_size, seqlen = input_ids.shape
         attention_mask = micro_batch["attention_mask"]
@@ -153,6 +154,7 @@ class DataParallelPPOActor(BasePPOActor):
         return log_probs
 
     def _optimizer_step(self) -> torch.Tensor:
+        breakpoint()
         if isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(self.config.max_grad_norm)
         else:
@@ -168,6 +170,7 @@ class DataParallelPPOActor(BasePPOActor):
 
     @torch.no_grad()
     def compute_log_prob(self, data: DataProto) -> torch.Tensor:
+        breakpoint()
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
@@ -210,6 +213,7 @@ class DataParallelPPOActor(BasePPOActor):
         return log_probs
 
     def update_policy(self, data: DataProto) -> Dict[str, Any]:
+        breakpoint()
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error

@@ -47,6 +47,11 @@ class DataConfig:
     seed: int = 1
     max_pixels: int = 4194304
     min_pixels: int = 262144
+    sampling_strategy: str = "shuffle"  # Options: "shuffle", "sequential", "curriculum"
+    curriculum_momentum: float = 1.0  # Only used when sampling_strategy is "curriculum", 1 means no momentum
+    curriculum_metric: str = "difficulty"  # Options: "difficulty", "learnability", "entropy", "distinct_3", "self_bleu_123", "edit_distance"
+    curriculum_update_freq: int = 1  # Update curriculum weights every N steps (0 means epoch-level updates)
+    curriculum_mixture_ratio: float = 0.5  # Ratio of weighted samples in each batch (0.0 to 1.0)
 
 
 @dataclass

@@ -50,6 +50,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.critic_optimizer = critic_optimizer
 
     def _forward_micro_batch(self, micro_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        breakpoint()
         input_ids = micro_batch["input_ids"]
         batch_size, seqlen = input_ids.shape
         attention_mask = micro_batch["attention_mask"]
@@ -122,6 +123,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         return values
 
     def _optimizer_step(self) -> torch.Tensor:
+        breakpoint()
         if isinstance(self.critic_module, FSDP):
             grad_norm = self.critic_module.clip_grad_norm_(self.config.max_grad_norm)
         else:
@@ -139,6 +141,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
     @torch.no_grad()
     def compute_values(self, data: DataProto) -> torch.Tensor:
+        breakpoint()
         self.critic_module.eval()
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
@@ -167,6 +170,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         return values
 
     def update_critic(self, data: DataProto) -> Dict[str, Any]:
+        breakpoint()
         self.critic_module.train()
 
         select_keys = ["input_ids", "responses", "attention_mask", "position_ids", "values", "returns"]
