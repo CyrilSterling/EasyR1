@@ -109,7 +109,6 @@ def compute_gae_advantage_return(
             shape: (bs, response_length)
 
     """
-    breakpoint()
     lastgaelam = 0
     advantages_reversed = []
     gen_len = token_level_rewards.shape[-1]
@@ -145,7 +144,6 @@ def compute_grpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape: (bs, response_length)
     """
-    breakpoint()
     response_length = token_level_rewards.shape[-1]
     scores = token_level_rewards.sum(dim=-1)
     id2score = defaultdict(list)
@@ -320,7 +318,6 @@ def compute_policy_loss(
         pg_clipfrac: (float)
             a float number indicating the fraction of policy gradient loss being clipped
     """
-    breakpoint()
     negative_approx_kl = log_probs - old_log_probs
     # clamp the ratio before exp to avoid nan
     # see: https://github.com/pytorch/pytorch/issues/10729
@@ -365,7 +362,6 @@ def compute_value_loss(
         vf_clipfrac: a float
             The ratio of vf being clipped
     """
-    breakpoint()
     vpredclipped = torch.clamp(vpreds, values - cliprange_value, values + cliprange_value)
     vf_losses1 = torch.square(vpreds - returns)
     vf_losses2 = torch.square(vpredclipped - returns)
@@ -385,7 +381,6 @@ def kl_penalty(log_probs: torch.FloatTensor, ref_log_probs: torch.FloatTensor, k
     Returns:
         kl_div: torch.Tensor
     """
-    breakpoint()
     log_probs, ref_log_probs = log_probs.float(), ref_log_probs.float()
     if kl_penalty == "kl":
         return log_probs - ref_log_probs

@@ -289,7 +289,6 @@ class RayPPOTrainer:
         reward_fn: Callable = None,
         val_reward_fn: Callable = None,
     ):
-        breakpoint()
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
@@ -339,7 +338,6 @@ class RayPPOTrainer:
         self._create_dataloader()
 
     def _create_dataloader(self) -> None:
-        breakpoint()
         self.train_dataset = RLHFDataset(
             data_path=self.config.data.train_files,
             tokenizer=self.tokenizer,
@@ -357,7 +355,6 @@ class RayPPOTrainer:
         # Initialize sampler based on configured strategy
         if self.config.data.sampling_strategy == "curriculum":
             # Initialize curriculum learning weights
-            breakpoint()
             self._init_curriculum_weights()
             
             # Create mixed curriculum sampler
@@ -431,54 +428,29 @@ class RayPPOTrainer:
         """Calculate the curriculum learning metric based on the configured strategy."""
         breakpoint()
         batch_size = len(batch.batch)
-        if self.config.data.curriculum_metric == "difficulty":
-            # Generate responses for the batch
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids"],
-            )
-            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
-            batch = batch.union(gen_batch_output)
-            
-            # Compute rewards for the batch
-            reward_tensor, _ = self.reward_fn(batch) ## shape is (batch_size*n, max_len)
-            # reshape to (batch_size, n, max_len)
-            reward_tensor = reward_tensor.view(batch_size, self.config.worker.rollout.n, -1)
-            
-            # Sequence-level average rewards over rollouts
-            return reward_tensor.mean(dim=-1).mean(dim=-1)
+        
+        # Generate responses for the batch
+        gen_batch = batch.pop(
+            batch_keys=["input_ids", "attention_mask", "position_ids"],
+            non_tensor_batch_keys=["raw_prompt_ids"],
+        )
+        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+        batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+        batch = batch.union(gen_batch_output)
 
-        elif self.config.data.curriculum_metric == "learnability":
-            # Generate responses for the batch
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids"],
-            )
-            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
-            batch = batch.union(gen_batch_output)
-            
+        if self.config.data.curriculum_metric == "learnability":
             # Compute rewards for the batch
-            reward_tensor, _ = self.reward_fn(batch)
+            breakpoint()
+            reward_tensor, reward_metrics = self.reward_fn(batch)
             # reshape to (batch_size, n, max_len)
-            reward_tensor = reward_tensor.view(batch_size, self.config.worker.rollout.n, -1)
+            acc_reward_tensor = reward_metrics["accuracy"].view(batch_size, self.config.worker.rollout.n, -1)
             
             # Calculate pass rate and learnability
-            pass_rate = reward_tensor.mean(dim=-1).mean(dim=-1)  # sequence-level average over rollouts
+            pass_rate = acc_reward_tensor.mean(dim=-1).mean(dim=-1)  # sequence-level average over rollouts
             learnability = pass_rate * (1 - pass_rate)
             return learnability
         
         elif self.config.data.curriculum_metric == "distinct_3":
-            # Generate responses for the batch
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids"],
-            )
-            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
-            batch = batch.union(gen_batch_output)
-            
             # Get tokenized sequences
             tokenized_sequences = gen_batch_output.batch["responses"].tolist() ## batch_size*n
             
@@ -489,15 +461,6 @@ class RayPPOTrainer:
             return torch.tensor(distinct_score, dtype=torch.float32)
             
         elif self.config.data.curriculum_metric == "self_bleu_123":
-            # Generate responses for the batch
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids"],
-            )
-            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
-            batch = batch.union(gen_batch_output)
-            
             # Get tokenized sequences
             tokenized_sequences = gen_batch_output.batch["responses"].tolist()
             
@@ -508,15 +471,6 @@ class RayPPOTrainer:
             return torch.tensor(bleu_score, dtype=torch.float32)
         
         elif self.config.data.curriculum_metric == "edit_distance":
-            # Generate responses for the batch
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids"],
-            )
-            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
-            batch = batch.union(gen_batch_output)
-            
             # Get tokenized sequences
             tokenized_sequences = gen_batch_output.batch["responses"].tolist()
             
@@ -527,15 +481,6 @@ class RayPPOTrainer:
             return torch.tensor(edit_score, dtype=torch.float32)
 
         elif self.config.data.curriculum_metric == "entropy":
-            # Generate responses for the batch
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids"],
-            )
-            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-            batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
-            batch = batch.union(gen_batch_output)
-            
             # Get log probabilities and calculate entropy
             log_probs = self.actor_rollout_wg.compute_log_probs(batch)
             entropy = -torch.sum(torch.exp(log_probs) * log_probs, dim=-1)
@@ -547,7 +492,6 @@ class RayPPOTrainer:
     def _init_curriculum_weights(self) -> None:
         """Initialize curriculum learning weights for each sample in the dataset."""
         # Create a temporary dataloader for initial weight estimation
-        breakpoint()
         temp_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=self.config.data.rollout_batch_size,
@@ -780,7 +724,6 @@ class RayPPOTrainer:
     def _update_curriculum_weights(self) -> None:
         """Update curriculum learning weights based on current model performance."""
         # Create a temporary dataloader for weight estimation
-        breakpoint()
         temp_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=self.config.data.rollout_batch_size,
