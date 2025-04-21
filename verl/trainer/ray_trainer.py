@@ -426,7 +426,6 @@ class RayPPOTrainer:
 
     def _calculate_curriculum_metric(self, batch: DataProto) -> torch.Tensor:
         """Calculate the curriculum learning metric based on the configured strategy."""
-        breakpoint()
         batch_size = len(batch.batch)
         
         # Generate responses for the batch
@@ -440,7 +439,6 @@ class RayPPOTrainer:
 
         if self.config.data.curriculum_metric == "learnability":
             # Compute rewards for the batch
-            breakpoint()
             reward_tensor, reward_metrics = self.reward_fn(batch)
             # reshape to (batch_size, n, max_len)
             acc_reward_tensor = reward_metrics["accuracy"].view(batch_size, self.config.worker.rollout.n, -1)
@@ -489,6 +487,20 @@ class RayPPOTrainer:
         else:
             raise ValueError(f"Unknown curriculum metric: {self.config.data.curriculum_metric}")
 
+    def _save_curriculum_weights(self, weights: torch.Tensor, step: int = None) -> None:
+        """Save curriculum weights to a file."""
+        # Create directory if it doesn't exist
+        weights_dir = os.path.join(self.config.trainer.save_checkpoint_path, "curriculum_weights")
+        os.makedirs(weights_dir, exist_ok=True)
+        
+        # Create filename based on step (if provided) or use 'initial'
+        filename = f"weights_step_{step}.pt" if step is not None else "initial_weights.pt"
+        weights_path = os.path.join(weights_dir, filename)
+        
+        # Save weights
+        torch.save(weights, weights_path)
+        print(f"Saved curriculum weights to {weights_path}")
+
     def _init_curriculum_weights(self) -> None:
         """Initialize curriculum learning weights for each sample in the dataset."""
         # Create a temporary dataloader for initial weight estimation
@@ -522,6 +534,53 @@ class RayPPOTrainer:
         
         # Store weights in dataset for access during training
         self.train_dataset.curriculum_weights = self.curriculum_weights
+        
+        # Save initial weights
+        self._save_curriculum_weights(self.curriculum_weights)
+
+    def _update_curriculum_weights(self) -> None:
+        """Update curriculum learning weights based on current model performance."""
+        # Create a temporary dataloader for weight estimation
+        temp_dataloader = StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=self.config.data.rollout_batch_size,
+            shuffle=False,
+            num_workers=8,
+            collate_fn=collate_fn,
+            pin_memory=False,
+            drop_last=False,
+        )
+        
+        # Initialize new weights tensor
+        new_weights = torch.zeros_like(self.curriculum_weights)
+        
+        # Estimate new weights
+        for batch_idx, batch_dict in enumerate(temp_dataloader):
+            batch = DataProto.from_single_dict(batch_dict)
+            
+            # Calculate curriculum metric
+            metric_values = self._calculate_curriculum_metric(batch)
+            
+            # Store the metric values as new weights
+            start_idx = batch_idx * self.config.data.rollout_batch_size
+            end_idx = min(start_idx + self.config.data.rollout_batch_size, len(self.train_dataset))
+            new_weights[start_idx:end_idx] = metric_values.detach()
+        
+        # Normalize new weights
+        new_weights = new_weights / new_weights.sum()
+        
+        # Update weights with configured momentum
+        momentum = self.config.data.curriculum_momentum
+        self.curriculum_weights = momentum * self.curriculum_weights + (1 - momentum) * new_weights
+        
+        # Update sampler weights
+        self.curriculum_sampler.update_weights(self.curriculum_weights)
+        
+        # Store updated weights in dataset
+        self.train_dataset.curriculum_weights = self.curriculum_weights
+        
+        # Save updated weights
+        self._save_curriculum_weights(self.curriculum_weights, step=self.global_step)
 
     def _maybe_log_val_generations(self, inputs: List[str], outputs: List[str], scores: List[float]) -> None:
         """Log a table of validation samples"""
@@ -720,47 +779,6 @@ class RayPPOTrainer:
             seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix
         )
         metrics.update(global_balance_stats)
-
-    def _update_curriculum_weights(self) -> None:
-        """Update curriculum learning weights based on current model performance."""
-        # Create a temporary dataloader for weight estimation
-        temp_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.rollout_batch_size,
-            shuffle=False,
-            num_workers=8,
-            collate_fn=collate_fn,
-            pin_memory=False,
-            drop_last=False,
-        )
-        
-        # Initialize new weights tensor
-        new_weights = torch.zeros_like(self.curriculum_weights)
-        
-        # Estimate new weights
-        for batch_idx, batch_dict in enumerate(temp_dataloader):
-            batch = DataProto.from_single_dict(batch_dict)
-            
-            # Calculate curriculum metric
-            metric_values = self._calculate_curriculum_metric(batch)
-            
-            # Store the metric values as new weights
-            start_idx = batch_idx * self.config.data.rollout_batch_size
-            end_idx = min(start_idx + self.config.data.rollout_batch_size, len(self.train_dataset))
-            new_weights[start_idx:end_idx] = metric_values.detach()
-        
-        # Normalize new weights
-        new_weights = new_weights / new_weights.sum()
-        
-        # Update weights with configured momentum
-        momentum = self.config.data.curriculum_momentum
-        self.curriculum_weights = momentum * self.curriculum_weights + (1 - momentum) * new_weights
-        
-        # Update sampler weights
-        self.curriculum_sampler.update_weights(self.curriculum_weights)
-        
-        # Store updated weights in dataset
-        self.train_dataset.curriculum_weights = self.curriculum_weights
 
     def fit(self):
         """
