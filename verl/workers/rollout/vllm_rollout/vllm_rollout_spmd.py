@@ -84,6 +84,7 @@ class vLLMRollout(BaseRollout):
             disable_mm_preprocessor_cache=True,
             disable_log_stats=config.disable_log_stats,
             enable_chunked_prefill=config.enable_chunked_prefill,
+            seed=int(os.getenv("RANK", "0")) // config.tensor_parallel_size,
             **vllm_init_kwargs,
         )
 
