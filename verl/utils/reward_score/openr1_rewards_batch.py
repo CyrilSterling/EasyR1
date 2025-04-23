@@ -8,7 +8,7 @@ from typing import Dict
 
 from latex2sympy2_extended import NormalizationConfig
 from math_verify import LatexExtractionConfig, parse, verify
-from .r1v import r1v_format_reward, r1v_accuracy_reward
+from .r1v import r1v_format_reward, r1v_accuracy_reward, r1v_accuracy_only_reward
 from .gpt_as_judge import openai_llm, get_compare_messages
 
 from mathruler.grader import extract_boxed_content
@@ -158,6 +158,81 @@ def accuracy_reward_batch_w_LMM_as_judge(predict_strs, ground_truths, prompt_str
     print(f"Corrected {gpt_corrects_num}/{len(idxs)} rewards using GPT as judge.")
     return acc_rewards
 
+def accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, response_length, **kwargs):
+    """Calculate accuracy rewards using vLLM as the judge.
+    
+    Args:
+        predict_strs: List of model predictions 
+        ground_truths: List of ground truth answers
+        prompt_strs: List of prompt strings
+        response_length: Maximum response length
+        **kwargs: Additional arguments
+            provider: The LLM provider type ("vllm")
+            base_url: The URL of the vLLM server
+            model_name: The name of the model to use
+            api_key: API key for the vLLM server (can be dummy for vLLM)
+    """
+    acc_rewards = []
+    for predict_str, ground_truth in zip(predict_strs, ground_truths):
+        acc_reward = r1v_accuracy_only_reward(predict_str, ground_truth, response_length)
+        acc_rewards.append(acc_reward)
+    
+    print("r1v_accuracy_reward: ", acc_rewards)
+        
+    # Initialize vLLM client using our modified openai_llm class
+    vllm_client = openai_llm(
+        provider="vllm",
+        base_url=kwargs.get("base_url", "http://localhost:8000/v1"),
+        model_name=kwargs.get("model_name", "NousResearch/Meta-Llama-3-8B-Instruct"),
+        api_key=kwargs.get("api_key", "dummy-key-for-vllm")  # Add API key with default
+    )
+    
+    # Find the index of acc_reward that is not 1.0
+    idxs = [i for i, acc_reward in enumerate(acc_rewards) if float(acc_reward) != 1.0]
+    if not idxs:  # If all rewards are already 1.0, return early
+        return acc_rewards
+        
+    message_list = []
+    # Process prompt_strs. The question is between \nuser\n and \nassistant\n
+    question_strs = [prompt_str.split("\nuser\n")[1].split("\nassistant\n")[0].strip() for prompt_str in prompt_strs]
+    
+    # Process answer_strs
+    answer_matches = [re.search(r"<answer>(.*?)</answer>", predict_str, re.DOTALL) for predict_str in predict_strs]
+    answer_strs_ = [answer_match.group(1).strip() if answer_match else predict_str.strip() for answer_match, predict_str in zip(answer_matches, predict_strs)]
+    answer_strs = []
+    for answer_str in answer_strs_:
+        if "boxed" in answer_str:
+            answer_str = extract_boxed_content(answer_str).strip()
+        answer_strs.append(answer_str)
+    
+    print(answer_strs)
+        
+    # Create messages for each answer that needs verification
+    for ind in idxs:
+        message = get_compare_messages(question_strs[ind], answer_strs[ind], ground_truths[ind])
+        message_list.append(message)
+        
+    # Get judgments from vLLM
+    vllm_outputs = vllm_client.generate_outputs(message_list)
+    print(vllm_outputs)
+    vllm_corrects_num = 0
+    
+    # Process the outputs
+    for i, vllm_output in enumerate(vllm_outputs):
+        # Find the content between <judge> and </judge> tags
+        judge_match = re.search(r"<judge>(.*?)</judge>", vllm_output, re.DOTALL)
+        if judge_match:
+            judge_content = judge_match.group()
+        else:
+            judge_content = "<judge>1</judge>"
+            
+        if judge_content.strip() == "<judge>0</judge>":  # Judge as correct
+            acc_rewards[idxs[i]] = 1.0
+            vllm_corrects_num += 1
+            
+    print(f"Corrected {vllm_corrects_num}/{len(idxs)} rewards using vLLM as judge.")
+    return acc_rewards
+
 def accuracy_reward_batch_wo_LMM(predict_strs, ground_truths, prompt_strs, response_length):
     acc_rewards = []
     for predict_str, ground_truth in zip(predict_strs, ground_truths):
@@ -205,6 +280,30 @@ def openr1_compute_score_batch_wo_LMM(predict_strs: list, ground_truths: list, p
     acc_rewards = accuracy_reward_batch_wo_LMM(predict_strs, ground_truths, prompt_strs, response_length)
     format_rewards = format_reward_batch(predict_strs)
     cosine_len_rewards = get_cosine_scaled_reward_batch(min_value_wrong=cos_len_reward_config['min_value_wrong'], max_value_wrong=cos_len_reward_config['max_value_wrong'], min_value_correct=cos_len_reward_config['min_value_correct'], max_value_correct=cos_len_reward_config['max_value_correct'], max_len=response_length)(predict_strs, ground_truths, acc_rewards)    
+    repetition_penalty_rewards = get_repetition_penalty_reward()(predict_strs)
+    reward_dicts = []
+    for acc_reward, format_reward, cosine_len_reward, repetition_penalty_reward in zip(acc_rewards, format_rewards, cosine_len_rewards, repetition_penalty_rewards):
+        reward_dict = {
+            "overall": acc_reward + format_reward + cosine_len_reward + repetition_penalty_reward,
+            "accuracy": acc_reward,
+            "format": format_reward,
+            "cosine_len": cosine_len_reward,
+            "repetition_penalty": repetition_penalty_reward
+        }
+        reward_dicts.append(reward_dict)
+    return reward_dicts
+
+def openr1_compute_score_batch_vllm(predict_strs: list, ground_truths: list, prompt_strs: list, validation: bool = False, response_length = None, cos_len_reward_config: list = None, **kwargs) -> float:
+    """Compute reward score based on the completion and ground truth.
+
+    Args:
+        predict_str: The completion string
+        ground_truth: The ground truth string
+        **kwargs: Additional arguments for vLLM client: base_url, model_name, api_key
+    """
+    acc_rewards = accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, response_length, **kwargs)
+    format_rewards = format_reward_batch(predict_strs)
+    cosine_len_rewards = get_cosine_scaled_reward_batch(min_value_wrong=cos_len_reward_config['min_value_wrong'], max_value_wrong=cos_len_reward_config['max_value_wrong'], min_value_correct=cos_len_reward_config['min_value_correct'], max_value_correct=cos_len_reward_config['max_value_correct'], max_len=response_length)(predict_strs, ground_truths, acc_rewards)
     repetition_penalty_rewards = get_repetition_penalty_reward()(predict_strs)
     reward_dicts = []
     for acc_reward, format_reward, cosine_len_reward, repetition_penalty_reward in zip(acc_rewards, format_rewards, cosine_len_rewards, repetition_penalty_rewards):

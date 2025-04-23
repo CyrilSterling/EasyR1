@@ -69,10 +69,28 @@ class Runner:
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         reward_fn = CustomRewardManager(
-            tokenizer=tokenizer, compute_score=config.worker.reward.compute_score, validation=False, response_length=config.data.max_response_length, batch_processing=config.worker.reward.batch_processing, cos_len_reward_config=config.worker.reward.cos_len_reward_config
+            tokenizer=tokenizer, 
+            compute_score=config.worker.reward.compute_score, 
+            validation=False, 
+            response_length=config.data.max_response_length, 
+            batch_processing=config.worker.reward.batch_processing, 
+            cos_len_reward_config=config.worker.reward.cos_len_reward_config,
+            provider=config.worker.reward.provider,
+            base_url=config.worker.reward.base_url,
+            model_name=config.worker.reward.model_name,
+            api_key=config.worker.reward.api_key
         )
         val_reward_fn = CustomRewardManager(
-            tokenizer=tokenizer, compute_score=config.worker.reward.compute_score, validation=True, response_length=config.data.max_response_length, batch_processing=config.worker.reward.batch_processing, cos_len_reward_config=config.worker.reward.cos_len_reward_config
+            tokenizer=tokenizer, 
+            compute_score=config.worker.reward.compute_score, 
+            validation=True, 
+            response_length=config.data.max_response_length, 
+            batch_processing=config.worker.reward.batch_processing, 
+            cos_len_reward_config=config.worker.reward.cos_len_reward_config,
+            provider=config.worker.reward.provider,
+            base_url=config.worker.reward.base_url,
+            model_name=config.worker.reward.model_name,
+            api_key=config.worker.reward.api_key
         )
 
         trainer = RayPPOTrainer(

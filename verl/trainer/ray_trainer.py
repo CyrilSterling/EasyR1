@@ -530,7 +530,11 @@ class RayPPOTrainer:
             self.curriculum_weights[start_idx:end_idx] = metric_values.detach()
         
         # Normalize weights to sum to 1
-        self.curriculum_weights = self.curriculum_weights / self.curriculum_weights.sum()
+        # self.curriculum_weights = self.curriculum_weights / self.curriculum_weights.sum()
+        # Normalize weights using min-max scaling
+        min_weight = self.curriculum_weights.min()
+        max_weight = self.curriculum_weights.max()
+        self.curriculum_weights = (self.curriculum_weights - min_weight) / (max_weight - min_weight)
         
         # Store weights in dataset for access during training
         self.train_dataset.curriculum_weights = self.curriculum_weights
@@ -567,7 +571,11 @@ class RayPPOTrainer:
             new_weights[start_idx:end_idx] = metric_values.detach()
         
         # Normalize new weights
-        new_weights = new_weights / new_weights.sum()
+        # new_weights = new_weights / new_weights.sum()
+        # Normalize weights using min-max scaling
+        min_weight = new_weights.min()
+        max_weight = new_weights.max()
+        new_weights = (new_weights - min_weight) / (max_weight - min_weight)
         
         # Update weights with configured momentum
         momentum = self.config.data.curriculum_momentum

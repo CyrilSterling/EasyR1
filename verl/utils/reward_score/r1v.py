@@ -293,7 +293,53 @@ def r1v_accuracy_reward(predict_str: str, ground_truth: str, response_length = N
             print(f"Error occurred when computing reward!\n[[predict_str]] {predict_str}\n[[ground_truth]] {ground_truth}")
         return 0.0
 
-    return 0.1
+
+def r1v_accuracy_only_reward(predict_str: str, ground_truth: str, response_length = None) -> float:
+    try:
+        ground_truth = ground_truth.strip()
+        content_match = re.search(r"<answer>(.*?)</answer>", predict_str, re.DOTALL)
+        pred_answer = content_match.group(1).strip()# if content_match else predict_str.strip()
+        pred_answer = extract_boxed_content(pred_answer).strip()
+        ## original mathruler match code
+        # # pred_answer = extract_boxed_content(pred_answer)
+        if is_choice_format(pred_answer) or is_choice_format(ground_truth):
+            pattern = r'^\(?([A-E])\)?(?:\.\s*|$|\s)'
+            pred_answer = re.match(pattern, pred_answer.strip().upper()).group(1)
+            ground_truth = re.match(pattern, ground_truth.strip().upper()).group(1)
+            if pred_answer == ground_truth:
+                return 1.0
+        if pred_answer == ground_truth:
+            return 1.0
+        pred_answer = normalize(pred_answer).strip()
+        ground_truth = normalize(ground_truth).strip()
+        if pred_answer == ground_truth:
+            return 1.0
+
+        if _is_float(pred_answer) and _is_float(ground_truth):
+            float_rounding_limit = min(len(pred_answer.split(".")[-1]), len(ground_truth.split(".")[-1]))
+        elif "pi" in pred_answer or "pi" in ground_truth:
+            float_rounding_limit = 2
+        else:
+            float_rounding_limit = 4
+        pred_answer = parse(f"\\boxed{{{pred_answer}}}")
+        ground_truth = parse(f"\\boxed{{{ground_truth}}}")
+
+        # consider the constant pi
+        pred_answer[0] = pred_answer[0].subs(pi, 3.14)
+        ground_truth[0] = ground_truth[0].subs(pi, 3.14)
+
+        # if content_match is None or pred_answer is None:
+        #     return 0.0
+        # print(pred_answer, ground_truth)
+        if verify(pred_answer, ground_truth, float_rounding=float_rounding_limit):
+            return 1.0
+    except Exception as e:
+        if isinstance(e, ValueError):
+            print(f"Error occurred when computing reward!\n[[predict_str]] {predict_str}\n[[ground_truth]] {ground_truth}")
+        return 0.0
+
+    return 0.0
+
 
 
 def r1v_compute_score_(predict_str: str, ground_truth: str, validation: bool = False, response_length = None) -> float:

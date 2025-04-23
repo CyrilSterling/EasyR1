@@ -74,6 +74,18 @@ worker:
   reward:
     reward_type: r1v
     compute_score: math
+
+  reward:
+    compute_score: "openr1_vllm"
+    batch_processing: true
+    provider: "vllm"
+    base_url: "http://your-vllm-server:8000/v1"
+    model_name: "NousResearch/Meta-Llama-3-8B-Instruct"
+    cos_len_reward_config:
+      min_value_wrong: -1.0
+      max_value_wrong: -0.5
+      min_value_correct: 0.0
+      max_value_correct: 0.0
     
 
 trainer:

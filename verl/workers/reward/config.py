@@ -16,7 +16,7 @@ Reward config
 """
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -24,4 +24,27 @@ class RewardConfig:
     reward_type: str = "function"
     compute_score: str = "math"
     batch_processing: bool = False
+    # Provider configuration for LLM judge
+    provider: str = "azure"  # Options: "azure", "vllm", "none"
+    base_url: Optional[str] = None  # For vLLM: URL of the vLLM server
+    model_name: Optional[str] = None  # For vLLM: Name of the model to use
+    api_key: Optional[str] = None  # For vLLM: API key (can be a dummy value)
     cos_len_reward_config: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Validate the configuration."""
+        if self.compute_score in ["openr1_vllm"]:
+            if self.provider != "vllm":
+                raise ValueError(f"For compute_score='{self.compute_score}', provider must be 'vllm'")
+            
+            if self.base_url is None:
+                # Set default base_url for vLLM
+                self.base_url = "http://localhost:8000/v1"
+                
+            if self.model_name is None:
+                # Set default model for vLLM
+                self.model_name = "NousResearch/Meta-Llama-3-8B-Instruct"
+                
+            if self.api_key is None:
+                # Set default API key for vLLM
+                self.api_key = "dummy-key-for-vllm"
