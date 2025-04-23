@@ -260,7 +260,8 @@ class DataParallelPPOActor(BasePPOActor):
                         log_probs=log_probs,
                         advantages=advantages,
                         eos_mask=response_mask,
-                        cliprange=self.config.clip_ratio,
+                        clip_low=self.config.clip_low,
+                        clip_high=self.config.clip_high,
                     )
                     if "ref_log_probs" in model_inputs:
                         ref_log_probs = model_inputs["ref_log_probs"]

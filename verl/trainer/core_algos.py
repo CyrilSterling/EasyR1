@@ -294,7 +294,8 @@ def compute_policy_loss(
     log_probs: torch.Tensor,
     advantages: torch.Tensor,
     eos_mask: torch.Tensor,
-    cliprange: float,
+    clip_low: float,
+    clip_high: float,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute the policy loss.
 
@@ -322,7 +323,7 @@ def compute_policy_loss(
     # clamp the ratio before exp to avoid nan
     # see: https://github.com/pytorch/pytorch/issues/10729
     ratio = torch.exp(negative_approx_kl)
-    clipped_ratio = torch.exp(torch.clamp(negative_approx_kl, np.log(1.0 - cliprange), np.log(1.0 + cliprange)))
+    clipped_ratio = torch.exp(torch.clamp(negative_approx_kl, np.log(1.0 - clip_low), np.log(1.0 + clip_high)))
     ppo_kl = VF.masked_mean(-negative_approx_kl, eos_mask)
 
     pg_losses = -advantages * ratio
