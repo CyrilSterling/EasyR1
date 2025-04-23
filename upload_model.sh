@@ -11,7 +11,8 @@ declare -A model_steps
 # model_steps["qwen25vl-7b-grpo-math6k_wo_GPT_cos1"]="50 100 165"                     
 # model_steps["qwen25vl-7b-grpo-math6k_4096_cos1"]="50 100 165"     
 # model_steps["qwen25vl-7b-grpo-math6k_4096_cos2"]="50 100 165"      
-model_steps["qwen25vl-7b-grpo-math6k_4096_cos2_rollout32"]="50 100 165"                  
+# model_steps["qwen25vl-7b-grpo-math6k_4096_cos2_rollout32"]="50 100 165"                  
+model_steps["qwen25vl-7b-grpo-math6k_4096_cos2_clip_higher"]="50 100 165" 
 
 # Iterate over each model and its corresponding checkpoints.
 for model in "${!model_steps[@]}"; do
