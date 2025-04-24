@@ -246,6 +246,12 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
         
         # Initialize random indices pool and tracking
         self._init_random_indices()
+        
+        # Cache for mixed indices to handle multiple calls to __iter__
+        self.cached_mixed_indices = None
+        
+        # Separate tracking variable for actual consumed batches in training
+        self.consumed_batches = 0
     
     def _init_random_indices(self):
         """Initialize random indices - creating a pool of random indices for the dataset."""
@@ -259,19 +265,14 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
         
         # Store the entire random permutation
         self.random_indices_pool = rand_indices
-        # Position tracker for random indices
+        # Position tracker for random indices used for initial index creation
         self.random_indices_position = 0
     
     def _get_next_random_indices(self, n):
         """Get next n random indices from our pre-shuffled pool, cycling if needed."""
         # If we're near the end of our pool, we need to cycle back
         if self.random_indices_position + n > len(self.random_indices_pool):
-            # Reshuffle the pool when we cycle back
-            if self.generator is not None:
-                self.random_indices_pool = torch.randperm(len(self.dataset), generator=self.generator).tolist()
-            else:
-                import random
-                random.shuffle(self.random_indices_pool)
+            # Just wrap around to the beginning without reshuffling
             self.random_indices_position = 0
         
         # Get the indices
@@ -279,62 +280,87 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
         self.random_indices_position += n
         return indices
     
+    def get_training_random_position(self):
+        """Get the current position in random indices used for actual training.
+        This is separate from the position used during index generation.
+        """
+        # Simply use modulo to handle wrap-around consistently with _get_next_random_indices
+        return (self.consumed_batches * self.n_random_per_batch) % len(self.random_indices_pool)
+    
+    def update_position_after_batch(self):
+        """Update tracking of consumed batches after each batch is processed in training.
+        This should be called after each batch is processed in the training loop.
+        """
+        # Increment the number of consumed batches
+        self.consumed_batches += 1
+    
     def __iter__(self):
-        # Get all indices from weighted sampler 
-        weighted_indices = list(self.weighted_sampler)
+        # Only compute indices if they haven't been cached
+        if self.cached_mixed_indices is None:
+            # Get all indices from weighted sampler 
+            weighted_indices = list(self.weighted_sampler)
+            
+            # Shuffle the weighted indices
+            if self.generator is not None:
+                rand_tensor = torch.randperm(len(weighted_indices), generator=self.generator)
+                weighted_indices = [weighted_indices[i] for i in rand_tensor]
+            else:
+                import random
+                random.shuffle(weighted_indices)
+            
+            # Create batches that maintain the mixture ratio
+            mixed_indices = []
+            num_batches = self.dataset_size // self.batch_size
+            
+            # Synchronize the position counter with the actual training position
+            # This ensures we continue from where training left off rather than restarting
+            self.random_indices_position = self.get_training_random_position()
+            print(f"Starting index generation with random_indices_position: {self.random_indices_position}")
+            
+            for batch_idx in range(num_batches):
+                # Calculate start indices for weighted part
+                w_start = batch_idx * self.n_weighted_per_batch
+                
+                # Get indices for this batch
+                batch_weighted = weighted_indices[w_start:w_start + self.n_weighted_per_batch]
+                # Get random indices from our tracked pool
+                batch_random = self._get_next_random_indices(self.n_random_per_batch)
+                
+                # Interleave the indices to maintain diversity within the batch
+                batch_indices = []
+                for i in range(max(len(batch_weighted), len(batch_random))):
+                    if i < len(batch_weighted):
+                        batch_indices.append(batch_weighted[i])
+                    if i < len(batch_random):
+                        batch_indices.append(batch_random[i])
+                
+                mixed_indices.extend(batch_indices)
+            
+            # Handle remaining samples if dataset size is not divisible by batch size
+            remaining = self.dataset_size % self.batch_size
+            if remaining > 0:
+                w_start = num_batches * self.n_weighted_per_batch
+                
+                n_remaining_weighted = int(remaining * self.mixture_ratio)
+                n_remaining_random = remaining - n_remaining_weighted
+                
+                batch_weighted = weighted_indices[w_start:w_start + n_remaining_weighted]
+                batch_random = self._get_next_random_indices(n_remaining_random)
+                
+                batch_indices = []
+                for i in range(max(len(batch_weighted), len(batch_random))):
+                    if i < len(batch_weighted):
+                        batch_indices.append(batch_weighted[i])
+                    if i < len(batch_random):
+                        batch_indices.append(batch_random[i])
+                        
+                mixed_indices.extend(batch_indices)
+            
+            # Store the computed indices
+            self.cached_mixed_indices = mixed_indices
         
-        # Shuffle the weighted indices
-        if self.generator is not None:
-            rand_tensor = torch.randperm(len(weighted_indices), generator=self.generator)
-            weighted_indices = [weighted_indices[i] for i in rand_tensor]
-        else:
-            import random
-            random.shuffle(weighted_indices)
-        
-        # Create batches that maintain the mixture ratio
-        mixed_indices = []
-        num_batches = self.dataset_size // self.batch_size
-        
-        for batch_idx in range(num_batches):
-            # Calculate start indices for weighted part
-            w_start = batch_idx * self.n_weighted_per_batch
-            
-            # Get indices for this batch
-            batch_weighted = weighted_indices[w_start:w_start + self.n_weighted_per_batch]
-            # Get random indices from our tracked pool
-            batch_random = self._get_next_random_indices(self.n_random_per_batch)
-            
-            # Interleave the indices to maintain diversity within the batch
-            batch_indices = []
-            for i in range(max(len(batch_weighted), len(batch_random))):
-                if i < len(batch_weighted):
-                    batch_indices.append(batch_weighted[i])
-                if i < len(batch_random):
-                    batch_indices.append(batch_random[i])
-            
-            mixed_indices.extend(batch_indices)
-        
-        # Handle remaining samples if dataset size is not divisible by batch size
-        remaining = self.dataset_size % self.batch_size
-        if remaining > 0:
-            w_start = num_batches * self.n_weighted_per_batch
-            
-            n_remaining_weighted = int(remaining * self.mixture_ratio)
-            n_remaining_random = remaining - n_remaining_weighted
-            
-            batch_weighted = weighted_indices[w_start:w_start + n_remaining_weighted]
-            batch_random = self._get_next_random_indices(n_remaining_random)
-            
-            batch_indices = []
-            for i in range(max(len(batch_weighted), len(batch_random))):
-                if i < len(batch_weighted):
-                    batch_indices.append(batch_weighted[i])
-                if i < len(batch_random):
-                    batch_indices.append(batch_random[i])
-                    
-            mixed_indices.extend(batch_indices)
-        
-        return iter(mixed_indices)
+        # Return iterator of cached indices
+        return iter(self.cached_mixed_indices)
     
     def __len__(self):
         return self.dataset_size
@@ -348,6 +374,8 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
             replacement=self.replacement,
             generator=self.generator
         )
+        # Reset the cached indices to force regeneration with new weights
+        self.cached_mixed_indices = None
         # Note: We don't reset random indices - this preserves their state between updates
 
 
@@ -890,6 +918,7 @@ class RayPPOTrainer:
         The driver process only need to call the compute functions of the worker group through RPC to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
+        breakpoint()
         self.logger = Tracker(loggers=self.config.trainer.logger, config=self.config.to_dict())
         self.global_step = 0
         val_metrics: Optional[Dict[str, Any]] = None
@@ -908,6 +937,11 @@ class RayPPOTrainer:
                 return
 
         for epoch in tqdm(range(self.config.trainer.total_episodes), desc="Episode", position=0):
+            # Reset cached indices to ensure new indices are generated with the correct random position
+            if self.config.data.sampling_strategy == "curriculum":
+                self.curriculum_sampler.cached_mixed_indices = None
+                print(f"Reset cached indices for epoch {epoch}, random position: {self.curriculum_sampler.get_training_random_position()}")
+            
             # Create a new iterator for each epoch 
             dataloader_iterator = iter(self.train_dataloader)
             
@@ -1068,6 +1102,8 @@ class RayPPOTrainer:
                                     "curriculum/std_weight": self.curriculum_weights.std().item(),
                                     "curriculum/min_weight": self.curriculum_weights.min().item(),
                                     "curriculum/max_weight": self.curriculum_weights.max().item(),
+                                    "curriculum/consumed_batches": self.curriculum_sampler.consumed_batches,
+                                    "curriculum/random_position": self.curriculum_sampler.get_training_random_position(),
                                 }
                                 metrics.update(curriculum_metrics)
 
@@ -1078,6 +1114,10 @@ class RayPPOTrainer:
                     metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
                     self.logger.log(data=metrics, step=self.global_step)
+                    
+                    # Update the random indices position to properly track the samples seen
+                    if self.config.data.sampling_strategy == "curriculum":
+                        self.curriculum_sampler.update_position_after_batch()
                 
                 except StopIteration:
                     # We've reached the end of the current iterator
@@ -1099,6 +1139,8 @@ class RayPPOTrainer:
                         "curriculum/std_weight": self.curriculum_weights.std().item(),
                         "curriculum/min_weight": self.curriculum_weights.min().item(),
                         "curriculum/max_weight": self.curriculum_weights.max().item(),
+                        "curriculum/consumed_batches": self.curriculum_sampler.consumed_batches,
+                        "curriculum/random_position": self.curriculum_sampler.get_training_random_position(),
                     }
                     self.logger.log(data=curriculum_metrics, step=self.global_step)
 

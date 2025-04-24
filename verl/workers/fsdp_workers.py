@@ -499,7 +499,7 @@ class FSDPWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_probs(self, data: DataProto):
-        breakpoint()
+        # breakpoint()
         assert self._is_actor
         data = data.to(torch.cuda.current_device())
         if self._use_param_offload:
