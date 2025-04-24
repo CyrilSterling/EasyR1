@@ -177,7 +177,7 @@ def accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, respons
         acc_reward = r1v_accuracy_only_reward(predict_str, ground_truth, response_length)
         acc_rewards.append(acc_reward)
     
-    print("r1v_accuracy_reward: ", acc_rewards)
+    # print("r1v_accuracy_reward: ", acc_rewards)
         
     # Initialize vLLM client using our modified openai_llm class
     vllm_client = openai_llm(
@@ -205,7 +205,7 @@ def accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, respons
             answer_str = extract_boxed_content(answer_str).strip()
         answer_strs.append(answer_str)
     
-    print(answer_strs)
+    # print(answer_strs)
         
     # Create messages for each answer that needs verification
     for ind in idxs:
@@ -214,7 +214,7 @@ def accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, respons
         
     # Get judgments from vLLM
     vllm_outputs = vllm_client.generate_outputs(message_list)
-    print(vllm_outputs)
+    # print(vllm_outputs)
     vllm_corrects_num = 0
     
     # Process the outputs

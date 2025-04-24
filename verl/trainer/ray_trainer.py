@@ -52,6 +52,9 @@ from ..workers.fsdp_workers import FSDPWorker
 from . import core_algos
 from .config import PPOConfig
 from .metrics import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics
+from PIL import Image
+# Allow very large images
+Image.MAX_IMAGE_PIXELS = None
 
 
 WorkerType = Type[Worker]
@@ -237,11 +240,12 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
         
         self.random_sampler = RandomSampler(
             data_source=dataset,
-            replacement=replacement,
+            replacement=False,
             generator=generator
         )
         
     def __iter__(self):
+        breakpoint()
         # Get indices from both samplers
         weighted_indices = list(self.weighted_sampler)
         random_indices = list(self.random_sampler)
@@ -331,6 +335,7 @@ class RayPPOTrainer:
         if self.use_critic and config.data.rollout_batch_size % config.worker.critic.global_batch_size != 0:
             raise ValueError("Rollout batch size must be divisible by global batch size.")
 
+        # breakpoint()
         # Initialize workers first
         self.init_workers()
         
@@ -438,11 +443,13 @@ class RayPPOTrainer:
         batch = batch.union(gen_batch_output)
 
         if self.config.data.curriculum_metric == "learnability":
+            # breakpoint()
             # Compute rewards for the batch
             reward_tensor, reward_metrics = self.reward_fn(batch)
+            # list to tensor
+            acc_reward_tensor = torch.tensor(reward_metrics["accuracy"], dtype=torch.float32)
             # reshape to (batch_size, n, max_len)
-            acc_reward_tensor = reward_metrics["accuracy"].view(batch_size, self.config.worker.rollout.n, -1)
-            
+            acc_reward_tensor = acc_reward_tensor.view(batch_size, self.config.worker.rollout.n, -1)
             # Calculate pass rate and learnability
             pass_rate = acc_reward_tensor.mean(dim=-1).mean(dim=-1)  # sequence-level average over rollouts
             learnability = pass_rate * (1 - pass_rate)
@@ -504,6 +511,7 @@ class RayPPOTrainer:
     def _init_curriculum_weights(self) -> None:
         """Initialize curriculum learning weights for each sample in the dataset."""
         # Create a temporary dataloader for initial weight estimation
+        breakpoint()
         temp_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=self.config.data.rollout_batch_size,
@@ -511,11 +519,13 @@ class RayPPOTrainer:
             num_workers=8,
             collate_fn=collate_fn,
             pin_memory=False,
-            drop_last=False,
+            drop_last=True,
         )
         
         # Initialize weights tensor
-        self.curriculum_weights = torch.ones(len(self.train_dataset), dtype=torch.float32)
+        # self.curriculum_weights = torch.ones(len(self.train_dataset), dtype=torch.float32)
+        # use since the drop_last is set to True, the last batch will be dropped, and the length of of the weights should be the same as the dataloader
+        self.curriculum_weights = torch.zeros(len(temp_dataloader) * self.config.data.rollout_batch_size, dtype=torch.float32)
         
         # Estimate initial weights
         for batch_idx, batch_dict in enumerate(temp_dataloader):
@@ -552,12 +562,13 @@ class RayPPOTrainer:
             num_workers=8,
             collate_fn=collate_fn,
             pin_memory=False,
-            drop_last=False,
+            drop_last=True,
         )
         
         # Initialize new weights tensor
         new_weights = torch.zeros_like(self.curriculum_weights)
         
+        breakpoint()
         # Estimate new weights
         for batch_idx, batch_dict in enumerate(temp_dataloader):
             batch = DataProto.from_single_dict(batch_dict)
