@@ -83,6 +83,7 @@ worker:
       - http://localhost:8002/v1
       - http://localhost:8003/v1
     model_name: /mnt/ai4sci_develop_hz/sicong/checkpoints/Qwen2.5-VL-3B-Instruct
+    api_key: dummy-key-for-vllm
     cos_len_reward_config: # [-1.0,-0.5,0.5,1.0]
       min_value_wrong: -1.0
       max_value_wrong: -0.5

@@ -74,11 +74,14 @@ worker:
 
   reward:
     reward_type: function
-    compute_score: openr1_wo_LMM # openr1_vllm
+    compute_score: openr1_vllm # openr1_wo_LMM
     batch_processing: true
-    # provider: vllm
-    # base_url: http://localhost:8000/v1
-    # model_name: /mnt/ai4sci_develop_hz/sicong/checkpoints/Qwen2.5-VL-3B-Instruct
+    provider: vllm
+    base_urls: 
+      - http://localhost:8000/v1
+      - http://localhost:8001/v1
+      - http://localhost:8002/v1
+      - http://localhost:8003/v1
     cos_len_reward_config: # [-1.0,-0.5,0.5,1.0]
       min_value_wrong: -1.0
       max_value_wrong: -0.5

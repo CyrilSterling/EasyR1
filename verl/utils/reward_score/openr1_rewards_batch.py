@@ -250,19 +250,14 @@ def accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, respons
             for chunk_pos, result in enumerate(client_results):
                 orig_idx = client_to_orig_idx.get((client_idx, chunk_pos))
                 vllm_outputs[orig_idx] = result
-            
+                
+        # Give a short delay to ensure all HTTP connections can complete properly
+        await asyncio.sleep(1)
+        
         return vllm_outputs
     
     # Run parallel processing
-    if asyncio.get_event_loop().is_running():
-        # If we're already in an event loop
-        vllm_outputs = asyncio.run_coroutine_threadsafe(
-            process_messages_in_parallel(), 
-            asyncio.get_event_loop()
-        ).result()
-    else:
-        # If no event loop is running
-        vllm_outputs = asyncio.run(process_messages_in_parallel())
+    vllm_outputs = asyncio.run(process_messages_in_parallel())
     
     vllm_corrects_num = 0
     

@@ -88,7 +88,7 @@ class Runner:
             batch_processing=config.worker.reward.batch_processing, 
             cos_len_reward_config=config.worker.reward.cos_len_reward_config,
             provider=config.worker.reward.provider,
-            base_url=config.worker.reward.base_url,
+            base_urls=config.worker.reward.base_urls,
             model_name=config.worker.reward.model_name,
             api_key=config.worker.reward.api_key
         )

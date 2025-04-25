@@ -458,6 +458,7 @@ class RayPPOTrainer:
             max_pixels=self.config.data.max_pixels,
         )
         
+        # breakpoint()
         # Initialize sampler based on configured strategy
         if self.config.data.sampling_strategy == "curriculum":
             # Initialize curriculum learning weights
@@ -918,7 +919,7 @@ class RayPPOTrainer:
         The driver process only need to call the compute functions of the worker group through RPC to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
-        breakpoint()
+        # breakpoint()
         self.logger = Tracker(loggers=self.config.trainer.logger, config=self.config.to_dict())
         self.global_step = 0
         val_metrics: Optional[Dict[str, Any]] = None
