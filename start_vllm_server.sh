@@ -1,10 +1,13 @@
 #!/bin/bash
 
-# Default model path - update this if your model is in a different location
-MODEL_PATH=${1:-"/root/autodl-tmp/pretrained_models/Qwen2.5-1.5B-Instruct"}
-PORT=${2:-8000}
-API_KEY=${3:-"dummy-key-for-vllm"}
-CUDA_DEVICES=${4:-"0"}
+# Fixed model path
+MODEL_PATH="/mnt/ai4sci_develop_hz/sicong/checkpoints/Qwen2.5-VL-3B-Instruct"
+# Port can be specified as the first argument, default is 8000
+PORT=${1:-8000}
+# Fixed API key
+API_KEY="dummy-key-for-vllm"
+# CUDA devices can be specified as the second argument, default is "0"
+CUDA_DEVICES=${2:-"0"}
 
 echo "Starting vLLM server with model: $MODEL_PATH on port $PORT with API key: $API_KEY"
 echo "Using CUDA devices: $CUDA_DEVICES"
