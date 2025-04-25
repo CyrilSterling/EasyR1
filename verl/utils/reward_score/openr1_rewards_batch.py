@@ -168,7 +168,7 @@ def accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, respons
         response_length: Maximum response length
         **kwargs: Additional arguments
             provider: The LLM provider type ("vllm")
-            base_url: The URL of the vLLM server
+            base_urls: List of URLs for vLLM servers for parallel processing
             model_name: The name of the model to use
             api_key: API key for the vLLM server (can be dummy for vLLM)
     """
@@ -177,22 +177,11 @@ def accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, respons
         acc_reward = r1v_accuracy_only_reward(predict_str, ground_truth, response_length)
         acc_rewards.append(acc_reward)
     
-    # print("r1v_accuracy_reward: ", acc_rewards)
-        
-    # Initialize vLLM client using our modified openai_llm class
-    vllm_client = openai_llm(
-        provider="vllm",
-        base_url=kwargs.get("base_url", "http://localhost:8000/v1"),
-        model_name=kwargs.get("model_name", "NousResearch/Meta-Llama-3-8B-Instruct"),
-        api_key=kwargs.get("api_key", "dummy-key-for-vllm")  # Add API key with default
-    )
-    
     # Find the index of acc_reward that is not 1.0
     idxs = [i for i, acc_reward in enumerate(acc_rewards) if float(acc_reward) != 1.0]
     if not idxs:  # If all rewards are already 1.0, return early
         return acc_rewards
         
-    message_list = []
     # Process prompt_strs. The question is between \nuser\n and \nassistant\n
     question_strs = [prompt_str.split("\nuser\n")[1].split("\nassistant\n")[0].strip() for prompt_str in prompt_strs]
     
@@ -205,16 +194,76 @@ def accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, respons
             answer_str = extract_boxed_content(answer_str).strip()
         answer_strs.append(answer_str)
     
-    # print(answer_strs)
-        
+    # Get base_urls - either a list or convert single URL to a list
+    base_urls = kwargs.get("base_urls", [kwargs.get("base_url", "http://localhost:8000/v1")])
+    if not isinstance(base_urls, list):
+        base_urls = [base_urls]
+    
+    model_name = kwargs.get("model_name", "NousResearch/Meta-Llama-3-8B-Instruct")
+    api_key = kwargs.get("api_key", "dummy-key-for-vllm")
+    
+    # Create vLLM clients for each endpoint
+    vllm_clients = [
+        openai_llm(
+            provider="vllm",
+            base_url=url,
+            model_name=model_name,
+            api_key=api_key
+        ) for url in base_urls
+    ]
+    
     # Create messages for each answer that needs verification
+    message_list = []
     for ind in idxs:
         message = get_compare_messages(question_strs[ind], answer_strs[ind], ground_truths[ind])
         message_list.append(message)
+    
+    # Distribute the messages across the available vLLM clients
+    num_clients = len(vllm_clients)
+    
+    async def process_messages_in_parallel():
+        # Split messages among clients
+        message_chunks = [[] for _ in range(num_clients)]
+        client_to_orig_idx = {}  # Maps (client_idx, chunk_position) to original message index
         
-    # Get judgments from vLLM
-    vllm_outputs = vllm_client.generate_outputs(message_list)
-    # print(vllm_outputs)
+        # Distribute messages across clients
+        for i, msg in enumerate(message_list):
+            client_idx = i % num_clients
+            chunk_pos = len(message_chunks[client_idx])
+            message_chunks[client_idx].append(msg)
+            client_to_orig_idx[(client_idx, chunk_pos)] = i
+        
+        # Process chunks in parallel
+        tasks = []
+        for i, client in enumerate(vllm_clients):
+            if message_chunks[i]:  # Only create tasks for chunks with messages
+                tasks.append(client.generate_outputs_async(message_chunks[i]))
+        
+        # Wait for all tasks to complete
+        results = await asyncio.gather(*tasks)
+        
+        # Create output array with correct size
+        vllm_outputs = ["<judge>1</judge>"] * len(message_list)
+        
+        # Map results back to their original positions
+        for client_idx, client_results in enumerate(results):
+            for chunk_pos, result in enumerate(client_results):
+                orig_idx = client_to_orig_idx.get((client_idx, chunk_pos))
+                vllm_outputs[orig_idx] = result
+            
+        return vllm_outputs
+    
+    # Run parallel processing
+    if asyncio.get_event_loop().is_running():
+        # If we're already in an event loop
+        vllm_outputs = asyncio.run_coroutine_threadsafe(
+            process_messages_in_parallel(), 
+            asyncio.get_event_loop()
+        ).result()
+    else:
+        # If no event loop is running
+        vllm_outputs = asyncio.run(process_messages_in_parallel())
+    
     vllm_corrects_num = 0
     
     # Process the outputs
@@ -230,7 +279,7 @@ def accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, respons
             acc_rewards[idxs[i]] = 1.0
             vllm_corrects_num += 1
             
-    print(f"Corrected {vllm_corrects_num}/{len(idxs)} rewards using vLLM as judge.")
+    print(f"Corrected {vllm_corrects_num}/{len(idxs)} rewards using vLLM as judge with {num_clients} endpoints.")
     return acc_rewards
 
 def accuracy_reward_batch_wo_LMM(predict_strs, ground_truths, prompt_strs, response_length):
@@ -299,7 +348,11 @@ def openr1_compute_score_batch_vllm(predict_strs: list, ground_truths: list, pro
     Args:
         predict_str: The completion string
         ground_truth: The ground truth string
-        **kwargs: Additional arguments for vLLM client: base_url, model_name, api_key
+        **kwargs: Additional arguments for vLLM client:
+            base_urls: List of URLs for vLLM servers for parallel processing
+            base_url: Single URL for vLLM server (deprecated, use base_urls instead)
+            model_name: The name of the model to use
+            api_key: API key for the vLLM server (can be dummy for vLLM)
     """
     acc_rewards = accuracy_reward_batch_vllm(predict_strs, ground_truths, prompt_strs, response_length, **kwargs)
     format_rewards = format_reward_batch(predict_strs)

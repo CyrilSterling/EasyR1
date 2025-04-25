@@ -228,6 +228,22 @@ class openai_llm:
         results = sorted(results, key=lambda x: x[0])
         results = [x[1] for x in results]
         return results
+        
+    async def generate_outputs_async(self, messages, **kwargs):
+        """Asynchronously generate outputs for a batch of messages.
+        
+        Args:
+            messages: List of message arrays to process
+            **kwargs: Additional arguments for the model
+            
+        Returns:
+            List of response contents
+        """
+        tasks = [self.generate_output_async(i, messages[i], **kwargs) for i in range(len(messages))]
+        results = await deal_tasks(tasks)
+        results = sorted(results, key=lambda x: x[0])
+        results = [x[1] for x in results]
+        return results
 
 # Default instance using Azure OpenAI
 # judger = openai_llm()

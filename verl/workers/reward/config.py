@@ -26,7 +26,7 @@ class RewardConfig:
     batch_processing: bool = False
     # Provider configuration for LLM judge
     provider: str = "azure"  # Options: "azure", "vllm", "none"
-    base_url: Optional[str] = None  # For vLLM: URL of the vLLM server
+    base_urls: Optional[list[str]] = None  # For vLLM: URLs of the vLLM servers
     model_name: Optional[str] = None  # For vLLM: Name of the model to use
     api_key: Optional[str] = None  # For vLLM: API key (can be a dummy value)
     cos_len_reward_config: Dict[str, Any] = field(default_factory=dict)
@@ -37,9 +37,9 @@ class RewardConfig:
             if self.provider != "vllm":
                 raise ValueError(f"For compute_score='{self.compute_score}', provider must be 'vllm'")
             
-            if self.base_url is None:
+            if self.base_urls is None:
                 # Set default base_url for vLLM
-                self.base_url = "http://localhost:8000/v1"
+                self.base_urls = ["http://localhost:8000/v1"]
                 
             if self.model_name is None:
                 # Set default model for vLLM

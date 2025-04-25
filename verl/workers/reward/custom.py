@@ -28,14 +28,14 @@ class RewardScore(TypedDict):
     accuracy: float
 
 class CustomRewardManager:
-    def __init__(self, tokenizer: PreTrainedTokenizer, compute_score: str, validation: bool, response_length: int = None, batch_processing: bool = False, cos_len_reward_config: list = None, provider: str = "azure", base_url: str = None, model_name: str = None, api_key: str = None):
+    def __init__(self, tokenizer: PreTrainedTokenizer, compute_score: str, validation: bool, response_length: int = None, batch_processing: bool = False, cos_len_reward_config: list = None, provider: str = "azure", base_urls: list = None, model_name: str = None, api_key: str = None):
         self.tokenizer = tokenizer
         self.validation = validation
         self.response_length = response_length
         self.batch_processing = batch_processing
         self.cos_len_reward_config = cos_len_reward_config
         self.provider = provider
-        self.base_url = base_url
+        self.base_urls = base_urls
         self.model_name = model_name
         self.api_key = api_key
         
@@ -125,7 +125,7 @@ class CustomRewardManager:
         if self.provider == "vllm":
             kwargs.update({
                 "provider": self.provider,
-                "base_url": self.base_url,
+                "base_urls": self.base_urls,
                 "model_name": self.model_name,
                 "api_key": self.api_key
             })
