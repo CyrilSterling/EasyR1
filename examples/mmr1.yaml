@@ -1,11 +1,11 @@
 data:
-  train_files: /mnt/ai4sci_develop_hz/sicong/EasyR1_official/data/hiyouga/geometry3k@train # /mnt/ai4sci_develop_hz/sicong/EasyR1_official/data/Sicong/RL_toy_math_5@train
-  val_files: /mnt/ai4sci_develop_hz/sicong/EasyR1/data/Sicong/GRPO_val_benchmark #/mnt/ai4sci_develop_hz/sicong/EasyR1_official/data/Sicong/RL_toy_math_5@validation
+  train_files: mm-o1/0424_rl_pub_tiku_10k@train 
+  val_files: mm-o1/math_vista_val 
   prompt_key: problem
   answer_key: answer
   image_key: images
-  max_prompt_length: 2048
-  max_response_length: 2048
+  max_prompt_length: 2048 # 可以观测一下wandb里的prompt clip ratio来觉得要不要提高
+  max_response_length: 8192
   rollout_batch_size: 512
   val_batch_size: -1
   shuffle: true
@@ -14,8 +14,8 @@ data:
   min_pixels: 7056
   sampling_strategy: curriculum  # Options: "shuffle", "sequential", "curriculum"
   curriculum_momentum: 1.0  # Only used when sampling_strategy is "curriculum", 1 means no momentum
-  curriculum_metric: learnability  # Options: "learnability", "entropy", "distinct_3", "self_bleu_123", "edit_distance"
-  curriculum_update_freq: 2  # Update curriculum weights every N steps (0 means epoch-level updates)
+  curriculum_metric: learnability  # Options:  "learnability", "entropy", "distinct_3", "self_bleu_123", "edit_distance"
+  curriculum_update_freq: 4  # Update curriculum weights every N steps (0 means epoch-level updates)
   curriculum_mixture_ratio: 0.5  # Ratio of weighted samples in each batch (0.0 to 1.0)
 
 algorithm:
@@ -34,7 +34,7 @@ worker:
     padding_free: true
     ulysses_sequence_parallel_size: 1
     model:
-      model_path: /mnt/ai4sci_develop_hz/sicong/checkpoints/Qwen2.5-VL-3B-Instruct
+      model_path: # path to our checkpoint
       enable_gradient_checkpointing: true
       trust_remote_code: false
       freeze_vision_tower: false
@@ -48,12 +48,12 @@ worker:
       enable_cpu_offload: false
       enable_rank0_init: true
     offload:
-      offload_params: true
-      offload_optimizer: true
+      offload_params: false
+      offload_optimizer: false
 
   rollout:
     temperature: 1.0
-    n: 2
+    n: 32
     gpu_memory_utilization: 0.6
     enforce_eager: false
     enable_chunked_prefill: false
@@ -62,7 +62,7 @@ worker:
     val_override_config:
       temperature: 0.5
       n: 1
-    max_num_batched_tokens: 8192
+    max_num_batched_tokens: 12288
 
   ref:
     fsdp:
@@ -89,11 +89,11 @@ trainer:
   total_episodes: 15
   logger: ["console", "wandb"]
   project_name: easy_r1
-  experiment_name: lmm_as_judge_debug
-  n_gpus_per_node: 4
-  nnodes: 1
+  experiment_name: # use your own experiment name
+  n_gpus_per_node: 8
+  nnodes: 8
   val_freq: 5  # -1 to disable
-  val_before_train: false # set to true when real train
+  val_before_train: true # set to true when real train
   val_only: false
   val_generations_to_log: 1
   save_freq: 50   # -1 to disable

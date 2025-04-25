@@ -1,0 +1,5 @@
+SYSTEM_PROMPT="""A conversation between User and Assistant. The User provides an image and asks a question. The Assistant first analyzes both the image and the question, then carefully thinks about the reasoning process step by step, and finally provides the User with an accurate answer. The Assistant must carefully checkout the correctness and validity of each reasoning step. If any errors or inconsistencies are found during the reasoning process, the Assistant reflects and corrects them logically. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., <think> reasoning process here, with potential reflections and corrections </think><answer> final answer here, with the key result enclosed in \boxed{} </answer>."""
+
+CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main \
+    config=examples/mmr1.yaml \
+    data.system_prompt="${SYSTEM_PROMPT}" \
