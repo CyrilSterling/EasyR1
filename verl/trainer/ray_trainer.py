@@ -573,13 +573,6 @@ class RayPPOTrainer:
             tokenized_sequences = gen_batch_output.batch["responses"].tolist()
             
             # Calculate self-BLEU-123 score using multiprocessing
-            # Define a function to calculate BLEU scores for a batch segment
-            def calculate_batch_bleu(batch_idx, tokens, n_per_item):
-                start_idx = batch_idx * n_per_item
-                end_idx = (batch_idx + 1) * n_per_item
-                item_tokens = tokens[start_idx:end_idx]
-                return calculate_self_bleu_123(item_tokens)
-            
             # Create a partial function with fixed arguments
             worker_fn = partial(calculate_batch_bleu, 
                                 tokens=tokenized_sequences, 
@@ -1231,3 +1224,11 @@ def calculate_pairwise_edit_distance(tokenized_sequences):
             distances.append(dist)
     
     return np.mean(distances) if distances else 0.0
+
+# Helper function for multiprocessing BLEU score calculation
+def calculate_batch_bleu(batch_idx, tokens, n_per_item):
+    """Calculate self-BLEU-123 score for a batch segment."""
+    start_idx = batch_idx * n_per_item
+    end_idx = (batch_idx + 1) * n_per_item
+    item_tokens = tokens[start_idx:end_idx]
+    return calculate_self_bleu_123(item_tokens)
