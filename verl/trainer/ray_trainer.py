@@ -53,6 +53,8 @@ from . import core_algos
 from .config import PPOConfig
 from .metrics import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics
 from PIL import Image
+import multiprocessing
+from functools import partial
 # Allow very large images
 Image.MAX_IMAGE_PIXELS = None
 
@@ -485,7 +487,7 @@ class RayPPOTrainer:
             dataset=self.train_dataset,
             batch_size=self.config.data.rollout_batch_size,
             sampler=sampler,
-            num_workers=8,
+            num_workers=32,
             collate_fn=collate_fn,
             pin_memory=False,
             drop_last=True,
@@ -510,7 +512,7 @@ class RayPPOTrainer:
             if self.config.data.val_batch_size == -1
             else self.config.data.val_batch_size,
             shuffle=False,
-            num_workers=8,
+            num_workers=32,
             collate_fn=collate_fn,
             pin_memory=False,
             drop_last=False,
@@ -570,10 +572,23 @@ class RayPPOTrainer:
             # Get tokenized sequences
             tokenized_sequences = gen_batch_output.batch["responses"].tolist()
             
-            # Calculate self-BLEU-123 score
-            bleu_score = []
-            for i in range(batch_size):
-                bleu_score.append(calculate_self_bleu_123(tokenized_sequences[i*self.config.worker.rollout.n:(i+1)*self.config.worker.rollout.n]))
+            # Calculate self-BLEU-123 score using multiprocessing
+            # Define a function to calculate BLEU scores for a batch segment
+            def calculate_batch_bleu(batch_idx, tokens, n_per_item):
+                start_idx = batch_idx * n_per_item
+                end_idx = (batch_idx + 1) * n_per_item
+                item_tokens = tokens[start_idx:end_idx]
+                return calculate_self_bleu_123(item_tokens)
+            
+            # Create a partial function with fixed arguments
+            worker_fn = partial(calculate_batch_bleu, 
+                                tokens=tokenized_sequences, 
+                                n_per_item=self.config.worker.rollout.n)
+            
+            # Use multiprocessing to compute BLEU scores in parallel
+            with multiprocessing.Pool(processes=32) as pool:
+                bleu_score = pool.map(worker_fn, range(batch_size))
+                
             return torch.tensor(bleu_score, dtype=torch.float32)
         
         elif self.config.data.curriculum_metric == "edit_distance":
@@ -616,7 +631,7 @@ class RayPPOTrainer:
             dataset=self.train_dataset,
             batch_size=self.config.data.rollout_batch_size,
             shuffle=False,
-            num_workers=8,
+            num_workers=32,
             collate_fn=collate_fn,
             pin_memory=False,
             drop_last=True,
@@ -650,7 +665,7 @@ class RayPPOTrainer:
         self.train_dataset.curriculum_weights = self.curriculum_weights
         
         # Save initial weights
-        self._save_curriculum_weights(self.curriculum_weights)
+        # self._save_curriculum_weights(self.curriculum_weights)
 
     def _update_curriculum_weights(self) -> None:
         """Update curriculum learning weights based on current model performance."""
@@ -659,7 +674,7 @@ class RayPPOTrainer:
             dataset=self.train_dataset,
             batch_size=self.config.data.rollout_batch_size,
             shuffle=False,
-            num_workers=8,
+            num_workers=32,
             collate_fn=collate_fn,
             pin_memory=False,
             drop_last=True,
@@ -698,14 +713,14 @@ class RayPPOTrainer:
         self.train_dataset.curriculum_weights = self.curriculum_weights
         
         # Save updated weights
-        self._save_curriculum_weights(self.curriculum_weights, step=self.global_step)
+        # self._save_curriculum_weights(self.curriculum_weights, step=self.global_step)
         
         # Create a new dataloader with the updated sampler
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=self.config.data.rollout_batch_size,
             sampler=self.curriculum_sampler,  # Using the updated sampler
-            num_workers=8,
+            num_workers=32,
             collate_fn=collate_fn,
             pin_memory=False,
             drop_last=True,
