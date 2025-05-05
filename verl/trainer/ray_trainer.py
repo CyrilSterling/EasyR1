@@ -542,7 +542,7 @@ class RayPPOTrainer:
             batch_keys=["input_ids", "attention_mask", "position_ids"],
             non_tensor_batch_keys=["raw_prompt_ids"],
         )
-        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch, curriculum=True)
         batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
         batch = batch.union(gen_batch_output)
 
