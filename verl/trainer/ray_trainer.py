@@ -542,8 +542,9 @@ class RayPPOTrainer:
             batch_keys=["input_ids", "attention_mask", "position_ids"],
             non_tensor_batch_keys=["raw_prompt_ids"],
         )
-        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch, curriculum=True)
-        batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+        curriculum_rollout_n = self.config.data.worker.rollout.curriculum_rollout_n
+        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch, curriculum=True, curriculum_rollout_n=curriculum_rollout_n)
+        batch = batch.repeat(repeat_times=curriculum_rollout_n, interleave=True)
         batch = batch.union(gen_batch_output)
 
         if self.config.data.curriculum_metric == "learnability":
@@ -551,7 +552,7 @@ class RayPPOTrainer:
             reward_tensor, reward_metrics = self.reward_fn(batch)
             # reshape to (batch_size, n, max_len)
             # reward_metrics["accuracy"] is a list, we need to convert it to a tensor
-            acc_reward_tensor = torch.tensor(reward_metrics["accuracy"], dtype=torch.float32).view(batch_size, self.config.worker.rollout.n, -1)
+            acc_reward_tensor = torch.tensor(reward_metrics["accuracy"], dtype=torch.float32).view(batch_size, curriculum_rollout_n, -1)
             
             # Calculate pass rate and learnability
             pass_rate = acc_reward_tensor.mean(dim=-1).mean(dim=-1)  # sequence-level average over rollouts
@@ -565,7 +566,7 @@ class RayPPOTrainer:
             # Calculate distinct-3 score for each question using n rollouts
             distinct_score = []
             for i in range(batch_size):
-                distinct_score.append(calculate_distinct_n(tokenized_sequences[i*self.config.worker.rollout.n:(i+1)*self.config.worker.rollout.n], n=3))
+                distinct_score.append(calculate_distinct_n(tokenized_sequences[i*curriculum_rollout_n:(i+1)*curriculum_rollout_n], n=3))
             return torch.tensor(distinct_score, dtype=torch.float32)
             
         elif self.config.data.curriculum_metric == "self_bleu_123":
@@ -576,7 +577,7 @@ class RayPPOTrainer:
             # Create a partial function with fixed arguments
             worker_fn = partial(calculate_batch_bleu, 
                                 tokens=tokenized_sequences, 
-                                n_per_item=self.config.worker.rollout.n)
+                                n_per_item=curriculum_rollout_n)
             
             # Use multiprocessing to compute BLEU scores in parallel
             with multiprocessing.Pool(processes=32) as pool:
@@ -591,13 +592,13 @@ class RayPPOTrainer:
             # Calculate edit distance
             edit_score = []
             for i in range(batch_size):
-                edit_score.append(calculate_pairwise_edit_distance(tokenized_sequences[i*self.config.worker.rollout.n:(i+1)*self.config.worker.rollout.n]))
+                edit_score.append(calculate_pairwise_edit_distance(tokenized_sequences[i*curriculum_rollout_n:(i+1)*curriculum_rollout_n]))
             return torch.tensor(edit_score, dtype=torch.float32)
 
         elif self.config.data.curriculum_metric == "learnability_distinct_3":
             # Compute learnability
             reward_tensor, reward_metrics = self.reward_fn(batch)
-            acc_reward_tensor = torch.tensor(reward_metrics["accuracy"], dtype=torch.float32).view(batch_size, self.config.worker.rollout.n, -1)
+            acc_reward_tensor = torch.tensor(reward_metrics["accuracy"], dtype=torch.float32).view(batch_size, curriculum_rollout_n, -1)
             pass_rate = acc_reward_tensor.mean(dim=-1).mean(dim=-1)
             learnability = pass_rate * (1 - pass_rate)
             
@@ -605,7 +606,7 @@ class RayPPOTrainer:
             tokenized_sequences = gen_batch_output.batch["responses"].tolist()
             distinct_score = []
             for i in range(batch_size):
-                distinct_score.append(calculate_distinct_n(tokenized_sequences[i*self.config.worker.rollout.n:(i+1)*self.config.worker.rollout.n], n=3))
+                distinct_score.append(calculate_distinct_n(tokenized_sequences[i*curriculum_rollout_n:(i+1)*curriculum_rollout_n], n=3))
             distinct_score = torch.tensor(distinct_score, dtype=torch.float32)
             
             # Combine with weighted sum
@@ -615,7 +616,7 @@ class RayPPOTrainer:
         elif self.config.data.curriculum_metric == "learnability_self_bleu_123":
             # Compute learnability
             reward_tensor, reward_metrics = self.reward_fn(batch)
-            acc_reward_tensor = torch.tensor(reward_metrics["accuracy"], dtype=torch.float32).view(batch_size, self.config.worker.rollout.n, -1)
+            acc_reward_tensor = torch.tensor(reward_metrics["accuracy"], dtype=torch.float32).view(batch_size, curriculum_rollout_n, -1)
             pass_rate = acc_reward_tensor.mean(dim=-1).mean(dim=-1)
             learnability = pass_rate * (1 - pass_rate)
             
@@ -623,7 +624,7 @@ class RayPPOTrainer:
             tokenized_sequences = gen_batch_output.batch["responses"].tolist()
             worker_fn = partial(calculate_batch_bleu, 
                                tokens=tokenized_sequences, 
-                               n_per_item=self.config.worker.rollout.n)
+                               n_per_item=curriculum_rollout_n)
             
             with multiprocessing.Pool(processes=32) as pool:
                 bleu_score = pool.map(worker_fn, range(batch_size))
@@ -637,7 +638,7 @@ class RayPPOTrainer:
         elif self.config.data.curriculum_metric == "learnability_edit_distance":
             # Compute learnability
             reward_tensor, reward_metrics = self.reward_fn(batch)
-            acc_reward_tensor = torch.tensor(reward_metrics["accuracy"], dtype=torch.float32).view(batch_size, self.config.worker.rollout.n, -1)
+            acc_reward_tensor = torch.tensor(reward_metrics["accuracy"], dtype=torch.float32).view(batch_size, curriculum_rollout_n, -1)
             pass_rate = acc_reward_tensor.mean(dim=-1).mean(dim=-1)
             learnability = pass_rate * (1 - pass_rate)
             
@@ -645,7 +646,7 @@ class RayPPOTrainer:
             tokenized_sequences = gen_batch_output.batch["responses"].tolist()
             edit_score = []
             for i in range(batch_size):
-                edit_score.append(calculate_pairwise_edit_distance(tokenized_sequences[i*self.config.worker.rollout.n:(i+1)*self.config.worker.rollout.n]))
+                edit_score.append(calculate_pairwise_edit_distance(tokenized_sequences[i*curriculum_rollout_n:(i+1)*curriculum_rollout_n]))
             edit_score = torch.tensor(edit_score, dtype=torch.float32)
             
             # Combine with weighted sum

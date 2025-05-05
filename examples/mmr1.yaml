@@ -54,6 +54,7 @@ worker:
   rollout:
     temperature: 1.0
     n: 32
+    curriculum_rollout_n: 8
     gpu_memory_utilization: 0.6
     enforce_eager: false
     enable_chunked_prefill: false

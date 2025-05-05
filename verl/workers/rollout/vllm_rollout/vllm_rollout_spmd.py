@@ -118,7 +118,7 @@ class vLLMRollout(BaseRollout):
             setattr(self.sampling_params, key, value)
 
     @torch.no_grad()
-    def generate_sequences(self, prompts: DataProto, curriculum: bool = False) -> DataProto:
+    def generate_sequences(self, prompts: DataProto, curriculum: bool = False, curriculum_rollout_n: int = 1) -> DataProto:
         # left-padded attention_mask
         input_ids: torch.Tensor = prompts.batch["input_ids"]  # (bs, prompt_length)
         attention_mask: torch.Tensor = prompts.batch["attention_mask"]
@@ -144,7 +144,7 @@ class vLLMRollout(BaseRollout):
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**prompts.meta_info):
             if curriculum:
-                self.sampling_params.n = 8
+                self.sampling_params.n = curriculum_rollout_n
             else:
                 self.sampling_params.n = self.original_n
 
