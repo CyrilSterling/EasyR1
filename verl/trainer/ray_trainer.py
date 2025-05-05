@@ -542,8 +542,11 @@ class RayPPOTrainer:
             batch_keys=["input_ids", "attention_mask", "position_ids"],
             non_tensor_batch_keys=["raw_prompt_ids"],
         )
-        curriculum_rollout_n = self.config.data.worker.rollout.curriculum_rollout_n
-        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch, curriculum=True, curriculum_rollout_n=curriculum_rollout_n)
+        # breakpoint()
+        curriculum_rollout_n = self.config.worker.rollout.curriculum_rollout_n
+        # Add curriculum parameters to meta_info instead of passing as arguments
+        gen_batch.meta_info = {"curriculum": True, "curriculum_rollout_n": curriculum_rollout_n}
+        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
         batch = batch.repeat(repeat_times=curriculum_rollout_n, interleave=True)
         batch = batch.union(gen_batch_output)
 

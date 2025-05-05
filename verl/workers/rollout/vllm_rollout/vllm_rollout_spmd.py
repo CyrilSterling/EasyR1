@@ -143,10 +143,13 @@ class vLLMRollout(BaseRollout):
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**prompts.meta_info):
+            # breakpoint()
             if curriculum:
                 self.sampling_params.n = curriculum_rollout_n
+                print(f"calling vllm generate seqs in curriculum rollout with sampling.n={self.sampling_params.n}")
             else:
                 self.sampling_params.n = self.original_n
+                print(f"calling vllm generate seqs in normal rollout with sampling.n={self.sampling_params.n}")
 
             completions: List[RequestOutput] = self.inference_engine.generate(
                 prompts=vllm_inputs, sampling_params=self.sampling_params, use_tqdm=(self.rank == 0)

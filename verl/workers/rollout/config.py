@@ -23,6 +23,7 @@ from typing import Any, Dict
 class RolloutConfig:
     name: str = "vllm"
     n: int = 1
+    curriculum_rollout_n: int = 1
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1
