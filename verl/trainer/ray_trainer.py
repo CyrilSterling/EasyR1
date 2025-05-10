@@ -749,7 +749,9 @@ class RayPPOTrainer:
             )
 
         gen_batch.meta_info["n"] = self.config.data.curriculum_rollout_n
+        gen_batch.meta_info["disable_sleep"] = True
         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+        gen_batch.meta_info.pop("disable_sleep")
         gen_batch.meta_info.pop("n")
 
         batch = batch.repeat(
