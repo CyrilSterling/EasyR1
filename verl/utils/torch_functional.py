@@ -32,7 +32,9 @@ except ImportError:
 
 
 @torch.compiler.disable()
-def log_probs_from_logits_flash_attn(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def log_probs_from_logits_flash_attn(
+    logits: torch.Tensor, labels: torch.Tensor
+) -> torch.Tensor:
     output = cross_entropy_loss(logits, labels, inplace_backward=True)
     if not isinstance(output, tuple):
         raise ValueError(
@@ -66,12 +68,16 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.T
     return output.view(*batch_dim)
 
 
-def masked_mean(values: torch.Tensor, mask: torch.Tensor, dim: int = None, eps: float = 1e-8) -> torch.Tensor:
+def masked_mean(
+    values: torch.Tensor, mask: torch.Tensor, dim: int = None, eps: float = 1e-8
+) -> torch.Tensor:
     """Compute mean of tensor with a masked values."""
     return (values * mask).sum(dim=dim) / (mask.sum(dim=dim) + eps)
 
 
-def masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
+def masked_var(
+    values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True
+) -> torch.Tensor:
     """Compute variance of tensor with masked values."""
     mean = masked_mean(values, mask)
     centered_values = values - mean
@@ -79,7 +85,9 @@ def masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) 
     if unbiased:
         mask_sum = mask.sum()
         if mask_sum <= 1:
-            print("The sum of the mask is less than one, which can cause a division by zero.")
+            print(
+                "The sum of the mask is less than one, which can cause a division by zero."
+            )
             return variance
 
         bessel_correction = mask_sum / (mask_sum - 1)
@@ -88,13 +96,19 @@ def masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) 
     return variance
 
 
-def masked_whiten(values: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def masked_whiten(
+    values: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8
+) -> torch.Tensor:
     """Whiten values with masked values."""
     mean, var = masked_mean(values, mask), masked_var(values, mask)
     return (values - mean) * torch.rsqrt(var + eps)
 
 
-def get_eos_mask(response_ids: torch.Tensor, eos_token_id: Union[int, List[int]] = 2, dtype: torch.dtype = torch.long):
+def get_eos_mask(
+    response_ids: torch.Tensor,
+    eos_token_id: Union[int, List[int]] = 2,
+    dtype: torch.dtype = torch.long,
+):
     """Get the mask for the response ids, the mask will be 0 after the first eos token.
 
     eos_token_id can be int or list: 1 or [1, 2].
@@ -127,7 +141,10 @@ def pad_2d_list_to_length(
     else:
         target_length = max_response_length
 
-    padded_response = [tuple(sub_list) + (pad_token_id,) * (target_length - len(sub_list)) for sub_list in response]
+    padded_response = [
+        tuple(sub_list) + (pad_token_id,) * (target_length - len(sub_list))
+        for sub_list in response
+    ]
     tensor = torch.tensor(padded_response)
     return tensor
 
@@ -141,8 +158,14 @@ def pad_sequence_to_length(
 
     pad_shape = list(tensor.shape)
     pad_shape[-1] = max_seq_len - tensor.size(-1)
-    pad_tensor = torch.full(pad_shape, fill_value=pad_token_id, dtype=tensor.dtype, device=tensor.device)
-    return torch.cat((pad_tensor, tensor), dim=-1) if left_pad else torch.cat((tensor, pad_tensor), dim=-1)
+    pad_tensor = torch.full(
+        pad_shape, fill_value=pad_token_id, dtype=tensor.dtype, device=tensor.device
+    )
+    return (
+        torch.cat((pad_tensor, tensor), dim=-1)
+        if left_pad
+        else torch.cat((tensor, pad_tensor), dim=-1)
+    )
 
 
 def postprocess_data(
@@ -159,12 +182,17 @@ def postprocess_data(
     seq_length = len(input_ids)
     if seq_length < max_length:
         input_ids = pad_sequence_to_length(
-            input_ids, max_seq_len=max_length, pad_token_id=pad_token_id, left_pad=left_pad
+            input_ids,
+            max_seq_len=max_length,
+            pad_token_id=pad_token_id,
+            left_pad=left_pad,
         )
         attention_mask = pad_sequence_to_length(
             attention_mask, max_seq_len=max_length, pad_token_id=0, left_pad=left_pad
         )
-        position_ids = pad_sequence_to_length(position_ids, max_seq_len=max_length, pad_token_id=0, left_pad=left_pad)
+        position_ids = pad_sequence_to_length(
+            position_ids, max_seq_len=max_length, pad_token_id=0, left_pad=left_pad
+        )
     elif seq_length > max_length:
         if truncation == "left":  # actually, left truncation may not be reasonable
             input_ids = input_ids[..., -max_length:]
@@ -276,7 +304,9 @@ class AnyPrecisionAdamW(torch.optim.Optimizer):
                     continue
 
                 if p.grad.is_sparse:
-                    raise RuntimeError("AnyPrecisionAdamW does not support sparse gradients.")
+                    raise RuntimeError(
+                        "AnyPrecisionAdamW does not support sparse gradients."
+                    )
 
                 state = self.state[p]
                 # State initialization
@@ -291,7 +321,9 @@ class AnyPrecisionAdamW(torch.optim.Optimizer):
 
                     # optional Kahan summation - accumulated error tracker
                     if use_kahan_summation:
-                        state["compensation"] = torch.zeros_like(p, dtype=compensation_buffer_dtype)
+                        state["compensation"] = torch.zeros_like(
+                            p, dtype=compensation_buffer_dtype
+                        )
 
                 # Main processing
                 # update the steps for each param group update
@@ -306,13 +338,19 @@ class AnyPrecisionAdamW(torch.optim.Optimizer):
                     p.data.mul_(1 - lr * weight_decay)
 
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)  # update momentum
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)  # update uncentered variance
+                exp_avg_sq.mul_(beta2).addcmul_(
+                    grad, grad, value=1 - beta2
+                )  # update uncentered variance
 
                 bias_correction1 = 1 - beta1**step  # adjust using bias1
                 step_size = lr / bias_correction1
 
-                denom_correction = (1 - beta2**step) ** 0.5  # adjust using bias2 and avoids math import
-                centered_variance = (exp_avg_sq.sqrt() / denom_correction).add_(eps, alpha=1)
+                denom_correction = (
+                    1 - beta2**step
+                ) ** 0.5  # adjust using bias2 and avoids math import
+                centered_variance = (exp_avg_sq.sqrt() / denom_correction).add_(
+                    eps, alpha=1
+                )
 
                 if use_kahan_summation:  # lr update to compensation
                     compensation = state["compensation"]

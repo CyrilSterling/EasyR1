@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
+from datasets import Dataset as HFDataset
 from datasets import load_dataset
 from PIL import Image
 from PIL.Image import Image as ImageObject
@@ -61,12 +62,16 @@ class ImageProcessMixin:
 
         if (image.width * image.height) > self.max_pixels:
             resize_factor = math.sqrt(self.max_pixels / (image.width * image.height))
-            width, height = int(image.width * resize_factor), int(image.height * resize_factor)
+            width, height = int(image.width * resize_factor), int(
+                image.height * resize_factor
+            )
             image = image.resize((width, height))
 
         if (image.width * image.height) < self.min_pixels:
             resize_factor = math.sqrt(self.min_pixels / (image.width * image.height))
-            width, height = int(image.width * resize_factor), int(image.height * resize_factor)
+            width, height = int(image.width * resize_factor), int(
+                image.height * resize_factor
+            )
             image = image.resize((width, height))
 
         if image.mode != "RGB":
@@ -111,7 +116,15 @@ class RLHFDataset(Dataset, ImageProcessMixin):
             data_split = "train"
 
         if os.path.isdir(data_path):
-            self.dataset = load_dataset("parquet", data_dir=data_path, split="train")
+            if any(filename.endswith(".parquet") for filename in os.listdir(data_path)):
+                self.dataset = load_dataset(
+                    "parquet", data_dir=data_path, split="train"
+                )
+            elif any(filename.endswith(".arrow") for filename in os.listdir(data_path)):
+                # load_from_disk, arrow format
+                self.dataset = HFDataset.load_from_disk(data_path)
+            else:
+                raise ValueError(f"Unsupported file format: {data_path}")
         elif os.path.isfile(data_path):
             self.dataset = load_dataset("parquet", data_files=data_path, split="train")
         else:  # remote dataset
@@ -137,9 +150,18 @@ class RLHFDataset(Dataset, ImageProcessMixin):
                     content_list.append({"type": "text", "text": content})
 
             messages = [{"role": "user", "content": content_list}]
-            prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            images = [self.process_image(image) for image in row_dict.pop(self.image_key)]
-            model_inputs = self.processor(images, [prompt], add_special_tokens=False, return_tensors="pt")
+            prompt = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
+            images = [
+                self.process_image(image) for image in row_dict.pop(self.image_key)
+            ]
+            try:
+                model_inputs = self.processor(
+                    images, [prompt], add_special_tokens=False, return_tensors="pt"
+                )
+            except Exception:
+                breakpoint()
             input_ids = model_inputs.pop("input_ids")[0]
             attention_mask = model_inputs.pop("attention_mask")[0]
             row_dict["multi_modal_data"] = {"image": images}
@@ -154,11 +176,17 @@ class RLHFDataset(Dataset, ImageProcessMixin):
             )  # (3, seq_length)
         else:
             messages = [{"role": "user", "content": prompt_str}]
-            prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            model_inputs = self.tokenizer([prompt], add_special_tokens=False, return_tensors="pt")
+            prompt = self.tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
+            model_inputs = self.tokenizer(
+                [prompt], add_special_tokens=False, return_tensors="pt"
+            )
             input_ids = model_inputs.pop("input_ids")[0]
             attention_mask = model_inputs.pop("attention_mask")[0]
-            position_ids = torch.clip(attention_mask.cumsum(dim=0) - 1, min=0, max=None)  # (seq_length,)
+            position_ids = torch.clip(
+                attention_mask.cumsum(dim=0) - 1, min=0, max=None
+            )  # (seq_length,)
 
         input_ids, attention_mask, position_ids = VF.postprocess_data(
             input_ids=input_ids,
@@ -172,6 +200,8 @@ class RLHFDataset(Dataset, ImageProcessMixin):
         row_dict["input_ids"] = input_ids
         row_dict["attention_mask"] = attention_mask
         row_dict["position_ids"] = position_ids
-        row_dict["raw_prompt_ids"] = self.tokenizer.encode(prompt, add_special_tokens=False)
+        row_dict["raw_prompt_ids"] = self.tokenizer.encode(
+            prompt, add_special_tokens=False
+        )
         row_dict["ground_truth"] = row_dict.pop(self.answer_key)
         return row_dict

@@ -34,7 +34,12 @@ from .config import ActorConfig
 
 
 try:
-    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+    from flash_attn.bert_padding import (
+        index_first_axis,
+        pad_input,
+        rearrange,
+        unpad_input,
+    )
 except ImportError:
     pass
 
@@ -57,11 +62,15 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         if config.use_torch_compile:
-            self.log_probs_from_logits = torch.compile(VF.log_probs_from_logits, dynamic=True)
+            self.log_probs_from_logits = torch.compile(
+                VF.log_probs_from_logits, dynamic=True
+            )
         else:
             self.log_probs_from_logits = VF.log_probs_from_logits
 
-    def _forward_micro_batch(self, micro_batch: Dict[str, torch.Tensor], temperature: float) -> torch.Tensor:
+    def _forward_micro_batch(
+        self, micro_batch: Dict[str, torch.Tensor], temperature: float
+    ) -> torch.Tensor:
         """
         Returns:
             log_probs: # (bs, response_len)
@@ -74,7 +83,9 @@ class DataParallelPPOActor(BasePPOActor):
         responses = micro_batch["responses"]
         response_length = responses.size(-1)
         if position_ids.dim() == 3:  # qwen2vl mrope
-            position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
+            position_ids = position_ids.transpose(
+                0, 1
+            )  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch:
@@ -92,28 +103,41 @@ class DataParallelPPOActor(BasePPOActor):
             # unpad the position_ids to align the rotary
             if position_ids.dim() == 3:
                 position_ids_rmpad = (
-                    index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."), indices)
+                    index_first_axis(
+                        rearrange(position_ids, "c b s ... -> (b s) c ..."), indices
+                    )
                     .transpose(0, 1)
                     .unsqueeze(1)
                 )  # (3, bsz, seqlen) -> (3, 1, bsz * seqlen)
             else:
                 position_ids_rmpad = index_first_axis(
-                    rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices
+                    rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
+                    indices,
                 ).transpose(0, 1)
 
             # for compute the log_prob
-            input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
+            input_ids_rmpad_rolled = torch.roll(
+                input_ids_rmpad, shifts=-1, dims=1
+            )  # (1, total_nnz)
 
             # pad and slice the inputs if sp > 1
             if self.config.ulysses_sequence_parallel_size > 1:
-                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
-                    input_ids_rmpad, position_ids_rmpad, sp_size=self.config.ulysses_sequence_parallel_size
+                input_ids_rmpad, position_ids_rmpad, pad_size = (
+                    ulysses_pad_and_slice_inputs(
+                        input_ids_rmpad,
+                        position_ids_rmpad,
+                        sp_size=self.config.ulysses_sequence_parallel_size,
+                    )
                 )
                 input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(
-                    input_ids_rmpad_rolled, None, self.config.ulysses_sequence_parallel_size
+                    input_ids_rmpad_rolled,
+                    None,
+                    self.config.ulysses_sequence_parallel_size,
                 )
 
-            input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
+            input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(
+                0
+            )  # ((total_nnz / sp) + pad)
 
             # only pass input_ids and position_ids to enable flash_attn_varlen
             output = self.actor_module(
@@ -126,18 +150,27 @@ class DataParallelPPOActor(BasePPOActor):
             logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
             logits_rmpad.div_(temperature)
             # ((total_nnz / sp) + pad)
-            log_probs = self.log_probs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+            log_probs = self.log_probs_from_logits(
+                logits=logits_rmpad, labels=input_ids_rmpad_rolled
+            )
 
             # gather log_prob if sp > 1
             if self.config.ulysses_sequence_parallel_size > 1:
                 # gather and unpad for the ulysses sp
-                log_probs = gather_outputs_and_unpad(log_probs, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                log_probs = gather_outputs_and_unpad(
+                    log_probs, gather_dim=0, unpad_dim=0, padding_size=pad_size
+                )
 
             # pad back to (bsz, seqlen)
             full_log_probs = pad_input(
-                hidden_states=log_probs.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
+                hidden_states=log_probs.unsqueeze(-1),
+                indices=indices,
+                batch=batch_size,
+                seqlen=seqlen,
             )
-            log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+            log_probs = full_log_probs.squeeze(-1)[
+                :, -response_length - 1 : -1
+            ]  # (bsz, response_length)
         else:
             output = self.actor_module(
                 input_ids=input_ids,
@@ -148,8 +181,12 @@ class DataParallelPPOActor(BasePPOActor):
             )
             logits: torch.Tensor = output.logits
             logits.div_(temperature)
-            logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
-            log_probs = self.log_probs_from_logits(logits, responses)  # (bsz, response_length)
+            logits = logits[
+                :, -response_length - 1 : -1, :
+            ]  # (bsz, response_length, vocab_size)
+            log_probs = self.log_probs_from_logits(
+                logits, responses
+            )  # (bsz, response_length)
 
         return log_probs
 
@@ -158,7 +195,9 @@ class DataParallelPPOActor(BasePPOActor):
         if isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(self.config.max_grad_norm)
         else:
-            grad_norm = nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.max_grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(
+                self.actor_module.parameters(), max_norm=self.config.max_grad_norm
+            )
 
         if not torch.isfinite(grad_norm):
             print("Gradient norm is not finite. Skip update.")
@@ -216,8 +255,17 @@ class DataParallelPPOActor(BasePPOActor):
         # breakpoint()
         self.actor_module.train()
 
-        temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error
-        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
+        temperature = data.meta_info[
+            "temperature"
+        ]  # temperature must be in the data.meta_info to avoid slient error
+        select_keys = [
+            "responses",
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "old_log_probs",
+            "advantages",
+        ]
         if self.config.use_kl_loss and not self.config.disable_kl:
             select_keys.append("ref_log_probs")
 
@@ -228,7 +276,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
-        mini_batches = data.select(select_keys, non_tensor_select_keys).split(self.config.global_batch_size_per_device)
+        mini_batches = data.select(select_keys, non_tensor_select_keys).split(
+            self.config.global_batch_size_per_device
+        )
 
         metrics = defaultdict(list)
         for _ in range(self.config.ppo_epochs):
@@ -237,11 +287,16 @@ class DataParallelPPOActor(BasePPOActor):
 
             for mini_batch in mini_batches:
                 gradient_accumulation = (
-                    self.config.global_batch_size_per_device // self.config.micro_batch_size_per_device_for_update
+                    self.config.global_batch_size_per_device
+                    // self.config.micro_batch_size_per_device_for_update
                 )
-                micro_batches = mini_batch.split(self.config.micro_batch_size_per_device_for_update)
+                micro_batches = mini_batch.split(
+                    self.config.micro_batch_size_per_device_for_update
+                )
                 if self.rank == 0:
-                    micro_batches = tqdm(micro_batches, desc="Update policy", position=3)
+                    micro_batches = tqdm(
+                        micro_batches, desc="Update policy", position=3
+                    )
 
                 for micro_batch in micro_batches:
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
@@ -253,7 +308,9 @@ class DataParallelPPOActor(BasePPOActor):
                     advantages = model_inputs["advantages"]
 
                     # all return: (bsz, response_length)
-                    log_probs = self._forward_micro_batch(model_inputs, temperature=temperature)
+                    log_probs = self._forward_micro_batch(
+                        model_inputs, temperature=temperature
+                    )
 
                     pg_loss, pg_clipfrac, ppo_kl = core_algos.compute_policy_loss(
                         old_log_probs=old_log_probs,

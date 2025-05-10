@@ -1,28 +1,14 @@
-import json
-import math
-from collections import defaultdict, Counter
-from openai import AzureOpenAI, AsyncAzureOpenAI, OpenAI, AsyncOpenAI
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_fixed,
-)
-import re
-import os
-import json
-
-from tqdm.asyncio import tqdm_asyncio
 import asyncio
-import jieba
-
-from math_verify import parse, verify
-from mathruler.grader import _is_float, _is_int, _str_is_int, _str_to_int, _parse_latex, _inject_implicit_mixed_number,extract_boxed_content, grade_answer
+import json
+import os
 
 from dotenv import load_dotenv
+from openai import AsyncAzureOpenAI, AsyncOpenAI, AzureOpenAI, OpenAI
+from tenacity import retry, stop_after_attempt, wait_fixed
+from tqdm.asyncio import tqdm_asyncio
 
 
-
-def get_compare_messages(question,response,answer):
+def get_compare_messages(question, response, answer):
     prompt = f"""
 Your task is to determine whether the user's answer is correct based on the provided questions and standard answers (for example, if the user expresses a similar meaning to the standard answer, or another interpretation of the standard answer, it is considered correct.)
 
@@ -54,17 +40,21 @@ for example:
 <think>The standard answer is 2t, and the user's answer is 2. The value before the unit is the same, so it is correct.</think>
 <judge>0</judge>
     """
-    messages = [{"role":"user","content":prompt}]
+    messages = [{"role": "user", "content": prompt}]
     return messages
 
 
 class fake_response:
-    def __init__(self,usage):
+    def __init__(self, usage):
         self.usage = usage
+
 
 def before_retry_fn(retry_state):
     if retry_state.attempt_number > 1:
-        print(f"Retrying API call. Attempt #{retry_state.attempt_number}, f{retry_state}")
+        print(
+            f"Retrying API call. Attempt #{retry_state.attempt_number}, f{retry_state}"
+        )
+
 
 async def deal_tasks(tasks, max_concurrent_tasks=256):
     semaphore = asyncio.Semaphore(max_concurrent_tasks)
@@ -90,7 +80,7 @@ class openai_llm:
     def __init__(self, provider="azure", **kwargs):
         """
         Initialize the LLM client.
-        
+
         Args:
             provider (str): The provider type - "azure" or "vllm"
             **kwargs: Additional arguments for specific providers
@@ -98,10 +88,10 @@ class openai_llm:
                 For azure: Uses environment variables by default
         """
         load_dotenv()
-        
+
         self.provider = provider
         self.token_log_file = "./logs/token.json"
-        
+
         if provider == "azure":
             # Azure OpenAI settings
             self.endpoint = os.getenv("OPENAI_ENDPOINT")
@@ -109,164 +99,163 @@ class openai_llm:
             self.api_version = "2024-02-15-preview"
             self.deployment = "gpt-4o-mini-0718"
             self.model = "gpt-4o-mini-0718"
-            
+
             self.client = AzureOpenAI(
                 azure_deployment=self.deployment,
                 azure_endpoint=self.endpoint,
                 api_key=self.api_key,
-                api_version=self.api_version
+                api_version=self.api_version,
             )
             self.async_client = AsyncAzureOpenAI(
                 azure_deployment=self.deployment,
                 azure_endpoint=self.endpoint,
                 api_key=self.api_key,
-                api_version=self.api_version
+                api_version=self.api_version,
             )
         elif provider == "vllm":
             # vLLM with OpenAI-compatible API settings
             self.base_url = kwargs.get("base_url", "http://localhost:8000/v1")
             self.api_key = kwargs.get("api_key", None)  # Make API key optional
-            self.model = kwargs.get("model_name", "NousResearch/Meta-Llama-3-8B-Instruct")
-            
+            self.model = kwargs.get(
+                "model_name", "NousResearch/Meta-Llama-3-8B-Instruct"
+            )
+
+            print(
+                f"Creating VLLM client with base_url: {self.base_url}, model_name: {self.model}, api_key: {self.api_key}"
+            )
+
             # Initialize client without api_key if it's None
-            if self.api_key is None:
-                self.client = OpenAI(
-                    base_url=self.base_url
-                )
-                self.async_client = AsyncOpenAI(
-                    base_url=self.base_url
-                )
-            else:
-                self.client = OpenAI(
-                    base_url=self.base_url,
-                    api_key=self.api_key
-                )
-                self.async_client = AsyncOpenAI(
-                    base_url=self.base_url,
-                    api_key=self.api_key
-                )
+            api_key_args = {} if self.api_key is None else {"api_key": self.api_key}
+            self.client = OpenAI(base_url=self.base_url, **api_key_args)
+            self.async_client = AsyncOpenAI(base_url=self.base_url, **api_key_args)
         else:
             raise ValueError(f"Unsupported provider: {provider}. Use 'azure' or 'vllm'")
-    
-    def cal_cost(self,response,**kwargs):
+
+    def cal_cost(self, response, **kwargs):
         if not os.path.exists(self.token_log_file):
             with open(self.token_log_file, "w") as f:
-                json.dump({"none":"none"},f)
+                json.dump({"none": "none"}, f)
         with open(self.token_log_file, "r") as f:
             tokens = json.load(f)
             current_model = kwargs.get("model", self.model)
             if current_model not in tokens:
-                tokens[current_model] = [0,0]
+                tokens[current_model] = [0, 0]
             tokens[current_model][0] += response.usage.prompt_tokens
             tokens[current_model][1] += response.usage.completion_tokens
         with open(self.token_log_file, "w") as f:
             json.dump(tokens, f)
-    
-    def cal_batch_cost(self,prompt_tokens,completion_tokens,**kwargs):
+
+    def cal_batch_cost(self, prompt_tokens, completion_tokens, **kwargs):
         if not os.path.exists(self.token_log_file):
             with open(self.token_log_file, "w") as f:
-                json.dump({"none":"none"},f)
+                json.dump({"none": "none"}, f)
         with open(self.token_log_file, "r") as f:
             tokens = json.load(f)
             current_model = kwargs.get("model", self.model)
             if current_model not in tokens:
-                tokens[current_model] = [0,0]
+                tokens[current_model] = [0, 0]
             tokens[current_model][0] += prompt_tokens
             tokens[current_model][1] += completion_tokens
         with open(self.token_log_file, "w") as f:
             json.dump(tokens, f)
 
     @retry(wait=wait_fixed(3), stop=stop_after_attempt(5), before=before_retry_fn)
-    def response(self,messages,**kwargs):
+    def response(self, messages, **kwargs):
         model = kwargs.get("model", self.model)
-        
+
         response = self.client.chat.completions.create(
             model=model,
             messages=messages,
             n=kwargs.get("n", 1),
             temperature=kwargs.get("temperature", 0),
             max_tokens=kwargs.get("max_tokens", 4000),
-            timeout=kwargs.get("timeout", 180)
+            timeout=kwargs.get("timeout", 180),
         )
         # self.cal_cost(response,**kwargs)
         return response.choices[0].message.content
-    
+
     @retry(wait=wait_fixed(3), stop=stop_after_attempt(5), before=before_retry_fn)
-    async def response_async(self,messages,**kwargs):
+    async def response_async(self, messages, **kwargs):
         model = kwargs.get("model", self.model)
-        
+
         response = await self.async_client.chat.completions.create(
             model=model,
             messages=messages,
             n=kwargs.get("n", 1),
             temperature=kwargs.get("temperature", 0),
             max_tokens=kwargs.get("max_tokens", 4096),
-            timeout=kwargs.get("timeout", 180)
-        )      
+            timeout=kwargs.get("timeout", 180),
+        )
         # self.cal_cost(response,**kwargs)
         return response.choices[0].message.content
-    
-    def generate_output(self,messages,**kwargs):
+
+    def generate_output(self, messages, **kwargs):
         try:
-            response = self.response(messages,**kwargs)
+            response = self.response(messages, **kwargs)
         except Exception as e:
-            response = "<judge>1</judge>" # if failed, return not match
+            response = "<judge>1</judge>"  # if failed, return not match
             print(f"get {kwargs.get('model', self.model)} response failed: {e}")
         return response
-    
-    async def generate_output_async(self,idx, messages,**kwargs):
+
+    async def generate_output_async(self, idx, messages, **kwargs):
         try:
-            response = await self.response_async(messages,**kwargs)
+            response = await self.response_async(messages, **kwargs)
         except Exception as e:
-            response = "<judge>1</judge>" # if failed, return not match
+            response = "<judge>1</judge>"  # if failed, return not match
             print(f"get {kwargs.get('model', self.model)} response failed: {e}")
-        return idx,response
-    
-    def generate_outputs(self,messages,**kwargs):
-        tasks = [self.generate_output_async(i,messages[i],**kwargs) for i in range(len(messages))]
+        return idx, response
+
+    def generate_outputs(self, messages, **kwargs):
+        tasks = [
+            self.generate_output_async(i, messages[i], **kwargs)
+            for i in range(len(messages))
+        ]
         results = asyncio.run(deal_tasks(tasks))
         results = sorted(results, key=lambda x: x[0])
         results = [x[1] for x in results]
         return results
-        
+
     async def generate_outputs_async(self, messages, **kwargs):
         """Asynchronously generate outputs for a batch of messages.
-        
+
         Args:
             messages: List of message arrays to process
             **kwargs: Additional arguments for the model
-            
+
         Returns:
             List of response contents
         """
-        tasks = [self.generate_output_async(i, messages[i], **kwargs) for i in range(len(messages))]
+        tasks = [
+            self.generate_output_async(i, messages[i], **kwargs)
+            for i in range(len(messages))
+        ]
         results = await deal_tasks(tasks)
         results = sorted(results, key=lambda x: x[0])
         results = [x[1] for x in results]
         return results
 
+
 # Default instance using Azure OpenAI
 # judger = openai_llm()
 
 if __name__ == "__main__":
-    
+
     # Test with Azure OpenAI
-    messages = [[{"role":"user","content":"how are you"}] for _ in range(3)]
+    messages = [[{"role": "user", "content": "how are you"}] for _ in range(3)]
     llm = openai_llm()
     results = llm.generate_outputs(messages)
     print("Azure OpenAI results:", results)
-    
+
     # Test with vLLM
     try:
         llm_vllm = openai_llm(
             provider="vllm",
             base_url="http://localhost:8000/v1",  # Change this to the actual vLLM server address
-            model_name="NousResearch/Meta-Llama-3-8B-Instruct"  # Change this to the actual model name
+            model_name="NousResearch/Meta-Llama-3-8B-Instruct",  # Change this to the actual model name
             # No API key needed when server doesn't require authentication
         )
-        vllm_messages = [[{"role":"user","content":"Tell me a short joke"}]]
+        vllm_messages = [[{"role": "user", "content": "Tell me a short joke"}]]
         vllm_results = llm_vllm.generate_outputs(vllm_messages)
         print("vLLM results:", vllm_results)
     except Exception as e:
         print(f"vLLM test failed (this is expected if vLLM server is not running): {e}")
-

@@ -50,12 +50,18 @@ def get_rope_index(
     tokens_per_second = 2
     image_token_id = processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
     video_token_id = processor.tokenizer.convert_tokens_to_ids("<|video_pad|>")
-    vision_start_token_id = processor.tokenizer.convert_tokens_to_ids("<|vision_start|>")
-    if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
+    vision_start_token_id = processor.tokenizer.convert_tokens_to_ids(
+        "<|vision_start|>"
+    )
+    if input_ids is not None and (
+        image_grid_thw is not None or video_grid_thw is not None
+    ):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
 
-        position_ids = torch.ones(3, input_ids.size(0), dtype=input_ids.dtype, device=input_ids.device)  # (3, seqlen)
+        position_ids = torch.ones(
+            3, input_ids.size(0), dtype=input_ids.dtype, device=input_ids.device
+        )  # (3, seqlen)
         image_index, video_index = 0, 0
         input_ids = input_ids[attention_mask == 1]
         image_nums, video_nums = 0, 0
@@ -109,19 +115,37 @@ def get_rope_index(
             text_len = ed - st
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
 
-            t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w)
+            t_index = (
+                torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w)
+            )
             t_index = (t_index * second_per_grid_t * tokens_per_second).long().flatten()
-            h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-            w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
-            llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
+            h_index = (
+                torch.arange(llm_grid_h)
+                .view(1, -1, 1)
+                .expand(llm_grid_t, -1, llm_grid_w)
+                .flatten()
+            )
+            w_index = (
+                torch.arange(llm_grid_w)
+                .view(1, 1, -1)
+                .expand(llm_grid_t, llm_grid_h, -1)
+                .flatten()
+            )
+            llm_pos_ids_list.append(
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+            )
             st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
-            llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
         position_ids[..., attention_mask == 1] = llm_positions.to(position_ids.device)
@@ -131,7 +155,11 @@ def get_rope_index(
             position_ids.masked_fill_(attention_mask == 0, 1)
             position_ids = position_ids.unsqueeze(0).expand(3, -1).to(input_ids.device)
         else:
-            position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).view(1, -1).expand(3, -1)
+            position_ids = (
+                torch.arange(input_ids.shape[1], device=input_ids.device)
+                .view(1, -1)
+                .expand(3, -1)
+            )
 
     return position_ids
 
@@ -141,17 +169,27 @@ def qwen2_vl_attn_forward(
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+    position_embeddings: Optional[
+        Tuple[torch.Tensor, torch.Tensor]
+    ] = None,  # will become mandatory in v4.46
     **kwargs,
 ) -> Tuple[torch.Tensor, None, None]:
     bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
-    query_states = self.q_proj(hidden_states)  # (batch_size, seq_length / sp_size, num_heads * head_size)
+    query_states = self.q_proj(
+        hidden_states
+    )  # (batch_size, seq_length / sp_size, num_heads * head_size)
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    query_states = query_states.view(
+        bsz, q_len, self.num_heads, self.head_dim
+    ).transpose(1, 2)
+    key_states = key_states.view(
+        bsz, q_len, self.num_key_value_heads, self.head_dim
+    ).transpose(1, 2)
+    value_states = value_states.view(
+        bsz, q_len, self.num_key_value_heads, self.head_dim
+    ).transpose(1, 2)
 
     # Because the input can be padded, the absolute sequence length depends on the max position id.
     if position_embeddings is None:

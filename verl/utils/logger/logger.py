@@ -21,7 +21,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from torch.utils.tensorboard import SummaryWriter
 
-from ..py_functional import convert_dict_to_str, flatten_dict, is_package_available, unflatten_dict
+from ..py_functional import (
+    convert_dict_to_str,
+    flatten_dict,
+    is_package_available,
+    unflatten_dict,
+)
 from .gen_logger import AggregateGenerationsLogger
 
 
@@ -129,7 +134,11 @@ LOGGERS = {
 
 
 class Tracker:
-    def __init__(self, loggers: Union[str, List[str]] = "console", config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        loggers: Union[str, List[str]] = "console",
+        config: Optional[Dict[str, Any]] = None,
+    ):
         if isinstance(loggers, str):
             loggers = [loggers]
 

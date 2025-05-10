@@ -1,7 +1,6 @@
 accelerate
 codetiming
 datasets
-flash-attn>=2.4.3
 liger-kernel
 mathruler
 numpy
@@ -18,3 +17,10 @@ torchdata
 transformers>=4.49.0
 vllm>=0.7.3
 wandb
+flash_attn==2.6.3
+tenacity
+math_verify
+jieba
+nltk
+Levenshtein
+tensorboard

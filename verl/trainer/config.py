@@ -17,7 +17,7 @@ PPO config
 
 import os
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from ..workers.config import WorkerConfig
 
@@ -48,10 +48,19 @@ class DataConfig:
     max_pixels: int = 4194304
     min_pixels: int = 262144
     sampling_strategy: str = "shuffle"  # Options: "shuffle", "sequential", "curriculum"
-    curriculum_momentum: float = 1.0  # Only used when sampling_strategy is "curriculum", 1 means no momentum
-    curriculum_metric: str = "difficulty"  # Options: "difficulty", "learnability", "entropy", "distinct_3", "self_bleu_123", "edit_distance"
-    curriculum_update_freq: int = 1  # Update curriculum weights every N steps (0 means epoch-level updates)
-    curriculum_mixture_ratio: float = 0.5  # Ratio of weighted samples in each batch (0.0 to 1.0)
+    curriculum_momentum: float = (
+        1.0  # Only used when sampling_strategy is "curriculum", 1 means no momentum
+    )
+    curriculum_metrics: List[str] = field(default_factory=list)
+    curriculum_metric_weights: List[float] = field(default_factory=list)
+    curriculum_update_freq: int = (
+        1  # Update curriculum weights every N steps (0 means epoch-level updates)
+    )
+    curriculum_mixture_ratio: float = (
+        0.5  # Ratio of weighted samples in each batch (0.0 to 1.0)
+    )
+    curriculum_rollout_n: int = 8
+    curriculum_rollout_batch_size: int = 8192
 
 
 @dataclass
@@ -89,7 +98,9 @@ class TrainerConfig:
 
     def post_init(self):
         if self.save_checkpoint_path is None:
-            self.save_checkpoint_path = os.path.join("checkpoints", self.project_name, self.experiment_name)
+            self.save_checkpoint_path = os.path.join(
+                "checkpoints", self.project_name, self.experiment_name
+            )
 
 
 @dataclass

@@ -15,9 +15,9 @@
 import re
 from typing import Dict
 
-from mathruler.grader import extract_boxed_content
 from math_verify import parse, verify
-from sympy import symbols, pi
+from mathruler.grader import extract_boxed_content
+from sympy import pi
 
 
 def _inject_implicit_mixed_number(step: str):
@@ -29,31 +29,33 @@ def _inject_implicit_mixed_number(step: str):
     step = p1.sub("\\1+\\2", step)  ## implicit mults
     return step
 
+
 def fix_frac(expr: str) -> str:
     # frac{xxx}{xxx} -> \frac{xxx}{xxx}
-    expr = re.sub(r'(?<!\\)frac', r'\\frac', expr)
+    expr = re.sub(r"(?<!\\)frac", r"\\frac", expr)
     # \fracab, \frac{a}b, \fraca{b}, \frac(a)b, \fraca(b), \frac(a)(b) -> \frac{a}{b}
-    expr = re.sub(r'\\frac([^{\s])([^{\s])', r'\\frac{\1}{\2}', expr)
-    expr = re.sub(r'\\frac(\{[^{}]+\})([^{\s])', r'\\frac\1{\2}', expr)
-    expr = re.sub(r'\\frac([^{\s])(\{[^{}]+\})', r'\\frac{\1}\2', expr)
-    expr = re.sub(r'\\frac\(([^()]+)\)\(([^()]+)\)', r'\\frac{\1}{\2}', expr)
-    expr = re.sub(r'\\frac([^{\s])\(([^()]+)\)', r'\\frac{\1}{\2}', expr)
-    expr = re.sub(r'\\frac\(([^()]+)\)([^{\s])', r'\\frac{\1}{\2}', expr)
+    expr = re.sub(r"\\frac([^{\s])([^{\s])", r"\\frac{\1}{\2}", expr)
+    expr = re.sub(r"\\frac(\{[^{}]+\})([^{\s])", r"\\frac\1{\2}", expr)
+    expr = re.sub(r"\\frac([^{\s])(\{[^{}]+\})", r"\\frac{\1}\2", expr)
+    expr = re.sub(r"\\frac\(([^()]+)\)\(([^()]+)\)", r"\\frac{\1}{\2}", expr)
+    expr = re.sub(r"\\frac([^{\s])\(([^()]+)\)", r"\\frac{\1}{\2}", expr)
+    expr = re.sub(r"\\frac\(([^()]+)\)([^{\s])", r"\\frac{\1}{\2}", expr)
     return expr
+
 
 def fix_sqrt(expr: str) -> str:
     # sqrt{xxx} -> \sqrt{xxx}
-    expr = re.sub(r'(?<!\\)sqrt', r'\\sqrt', expr)
+    expr = re.sub(r"(?<!\\)sqrt", r"\\sqrt", expr)
     # \sqrt(xxx) -> \sqrt{xxx}
-    expr = re.sub(r"\\sqrt\((.*?)\)", r'\\sqrt{\1}', expr)
+    expr = re.sub(r"\\sqrt\((.*?)\)", r"\\sqrt{\1}", expr)
     # \sqrtxxxx -> \sqrt{x}xxx
-    expr = re.sub(r'\\sqrt(?!\{)(.)', r'\\sqrt{\1}', expr)
+    expr = re.sub(r"\\sqrt(?!\{)(.)", r"\\sqrt{\1}", expr)
     return expr
 
 
 def fix_pi(expr: str) -> str:
     # pi -> \pi
-    expr = re.sub(r'(?<!\\)pi', r'\\pi', expr)
+    expr = re.sub(r"(?<!\\)pi", r"\\pi", expr)
     expr = expr.replace("π", "\\pi")
     return expr
 
@@ -67,7 +69,7 @@ def _is_float(num: str) -> bool:
 
 
 def get_decimal_places(s):
-    match = re.search(r'\.(\d+)', s)
+    match = re.search(r"\.(\d+)", s)
     return len(match.group(1)) if match else 0
 
 
@@ -76,11 +78,12 @@ def replace_circled_numbers(text: str) -> str:
         char = match.group(0)
         return str(ord(char) - 0x2460 + 1)
 
-    pattern = r'[\u2460-\u2473]'
+    pattern = r"[\u2460-\u2473]"
     if re.search(pattern, text) is not None:
         text = text.replace(",", "")
         return re.sub(pattern, circled_to_digit, text)
     return text
+
 
 def normalize(expr: str) -> str:
     """Normalize answer expressions."""
@@ -92,9 +95,8 @@ def normalize(expr: str) -> str:
     # if m is not None:
     #     expr = m.group("text")
     # Remove enclosing `\text{}`. Execute twice to account for two levels of nesting.
-    expr = re.sub(r"\\text\{(.*?)\}", r'\1', expr)
-    expr = re.sub(r"\\text\{(.*?)\}", r'\1', expr)
-
+    expr = re.sub(r"\\text\{(.*?)\}", r"\1", expr)
+    expr = re.sub(r"\\text\{(.*?)\}", r"\1", expr)
 
     expr = expr.replace("\\%", "%")
     expr = expr.replace("\\$", "$")
@@ -152,8 +154,12 @@ def normalize(expr: str) -> str:
         "元",
     ]:
         # end by es/s, ^d or unicode superscript
-        expr = re.sub(rf"{unit}(es)?(s)? *(\^({{*)[0-9]+(}}*))?([\u00B2\u00B3\u2070-\u2079]+)?", "", expr)
-    
+        expr = re.sub(
+            rf"{unit}(es)?(s)? *(\^({{*)[0-9]+(}}*))?([\u00B2\u00B3\u2070-\u2079]+)?",
+            "",
+            expr,
+        )
+
     # delete \cric or ^\cric or ^{\cric} or unicode format degree
     expr = re.sub(r"\^ *\\circ", "", expr)
     expr = re.sub(r"\^ *{\\circ}", "", expr)
@@ -182,7 +188,7 @@ def normalize(expr: str) -> str:
     # expr = expr.replace("{", "")
     # expr = expr.replace("}", "")
 
-    # if we somehow still have blank (), drop them 
+    # if we somehow still have blank (), drop them
     expr = expr.replace("()", "")
     expr = expr.replace("{}", "")
 
@@ -229,7 +235,7 @@ def normalize(expr: str) -> str:
 
 def is_choice_format(expr):
     expr = expr.strip().upper()
-    return bool(re.match(r'^([A-E]$|\([A-E]\)$|[A-E]\.|\([A-E]\))', expr))
+    return bool(re.match(r"^([A-E]$|\([A-E]\)$|[A-E]\.|\([A-E]\))", expr))
 
 
 def r1v_format_reward(predict_str: str) -> float:
@@ -245,16 +251,20 @@ def r1v_format_reward(predict_str: str) -> float:
     # return 0.0
 
 
-def r1v_accuracy_reward(predict_str: str, ground_truth: str, response_length = None) -> float:
+def r1v_accuracy_reward(
+    predict_str: str, ground_truth: str, response_length=None
+) -> float:
     try:
         ground_truth = ground_truth.strip()
         content_match = re.search(r"<answer>(.*?)</answer>", predict_str, re.DOTALL)
-        pred_answer = content_match.group(1).strip()# if content_match else predict_str.strip()
+        pred_answer = content_match.group(
+            1
+        ).strip()  # if content_match else predict_str.strip()
         pred_answer = extract_boxed_content(pred_answer).strip()
         ## original mathruler match code
         # # pred_answer = extract_boxed_content(pred_answer)
         if is_choice_format(pred_answer) or is_choice_format(ground_truth):
-            pattern = r'^\(?([A-E])\)?(?:\.\s*|$|\s)'
+            pattern = r"^\(?([A-E])\)?(?:\.\s*|$|\s)"
             pred_answer = re.match(pattern, pred_answer.strip().upper()).group(1)
             ground_truth = re.match(pattern, ground_truth.strip().upper()).group(1)
             if pred_answer == ground_truth:
@@ -269,7 +279,9 @@ def r1v_accuracy_reward(predict_str: str, ground_truth: str, response_length = N
             return 1.0
 
         if _is_float(pred_answer) and _is_float(ground_truth):
-            float_rounding_limit = min(len(pred_answer.split(".")[-1]), len(ground_truth.split(".")[-1]))
+            float_rounding_limit = min(
+                len(pred_answer.split(".")[-1]), len(ground_truth.split(".")[-1])
+            )
         elif "pi" in pred_answer or "pi" in ground_truth:
             float_rounding_limit = 2
         else:
@@ -290,20 +302,26 @@ def r1v_accuracy_reward(predict_str: str, ground_truth: str, response_length = N
             return 0.1
     except Exception as e:
         if isinstance(e, ValueError):
-            print(f"Error occurred when computing reward!\n[[predict_str]] {predict_str}\n[[ground_truth]] {ground_truth}")
+            print(
+                f"Error occurred when computing reward!\n[[predict_str]] {predict_str}\n[[ground_truth]] {ground_truth}"
+            )
         return 0.0
 
 
-def r1v_accuracy_only_reward(predict_str: str, ground_truth: str, response_length = None) -> float:
+def r1v_accuracy_only_reward(
+    predict_str: str, ground_truth: str, response_length=None
+) -> float:
     try:
         ground_truth = ground_truth.strip()
         content_match = re.search(r"<answer>(.*?)</answer>", predict_str, re.DOTALL)
-        pred_answer = content_match.group(1).strip()# if content_match else predict_str.strip()
+        pred_answer = content_match.group(
+            1
+        ).strip()  # if content_match else predict_str.strip()
         pred_answer = extract_boxed_content(pred_answer).strip()
         ## original mathruler match code
         # # pred_answer = extract_boxed_content(pred_answer)
         if is_choice_format(pred_answer) or is_choice_format(ground_truth):
-            pattern = r'^\(?([A-E])\)?(?:\.\s*|$|\s)'
+            pattern = r"^\(?([A-E])\)?(?:\.\s*|$|\s)"
             pred_answer = re.match(pattern, pred_answer.strip().upper()).group(1)
             ground_truth = re.match(pattern, ground_truth.strip().upper()).group(1)
             if pred_answer == ground_truth:
@@ -316,7 +334,9 @@ def r1v_accuracy_only_reward(predict_str: str, ground_truth: str, response_lengt
             return 1.0
 
         if _is_float(pred_answer) and _is_float(ground_truth):
-            float_rounding_limit = min(len(pred_answer.split(".")[-1]), len(ground_truth.split(".")[-1]))
+            float_rounding_limit = min(
+                len(pred_answer.split(".")[-1]), len(ground_truth.split(".")[-1])
+            )
         elif "pi" in pred_answer or "pi" in ground_truth:
             float_rounding_limit = 2
         else:
@@ -335,14 +355,17 @@ def r1v_accuracy_only_reward(predict_str: str, ground_truth: str, response_lengt
             return 1.0
     except Exception as e:
         if isinstance(e, ValueError):
-            print(f"Error occurred when computing reward!\n[[predict_str]] {predict_str}\n[[ground_truth]] {ground_truth}")
+            print(
+                f"Error occurred when computing reward!\n[[predict_str]] {predict_str}\n[[ground_truth]] {ground_truth}"
+            )
         return 0.0
 
     return 0.0
 
 
-
-def r1v_compute_score_(predict_str: str, ground_truth: str, validation: bool = False, response_length = None) -> float:
+def r1v_compute_score_(
+    predict_str: str, ground_truth: str, validation: bool = False, response_length=None
+) -> float:
     acc_reward = r1v_accuracy_reward(predict_str, ground_truth, response_length)
     format_reward = r1v_format_reward(predict_str)
     if validation:
@@ -352,6 +375,7 @@ def r1v_compute_score_(predict_str: str, ground_truth: str, validation: bool = F
         reward = train_acc_reward * 0.9 + format_reward * 0.1
     # reward /= 2
     return reward
+
 
 def r1v_compute_score(predict_str: str, ground_truth: str) -> Dict[str, float]:
     format = r1v_format_reward(predict_str)

@@ -16,6 +16,10 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 """
 
 import json
+import sys
+
+
+print(f"sys.executable: {sys.executable}")
 
 import ray
 from omegaconf import OmegaConf
@@ -66,31 +70,35 @@ class Runner:
             Role.Critic: global_pool_id,
             Role.RefPolicy: global_pool_id,
         }
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec, mapping=mapping
+        )
 
         reward_fn = CustomRewardManager(
-            tokenizer=tokenizer, 
-            compute_score=config.worker.reward.compute_score, 
-            validation=False, 
-            response_length=config.data.max_response_length, 
-            batch_processing=config.worker.reward.batch_processing, 
+            tokenizer=tokenizer,
+            compute_score=config.worker.reward.compute_score,
+            validation=False,
+            response_length=config.data.max_response_length,
+            batch_processing=config.worker.reward.batch_processing,
             cos_len_reward_config=config.worker.reward.cos_len_reward_config,
             provider=config.worker.reward.provider,
             base_urls=config.worker.reward.base_urls,
             model_name=config.worker.reward.model_name,
-            api_key=config.worker.reward.api_key
+            api_key=config.worker.reward.api_key,
+            workflow_id=config.worker.reward.workflow_id,
         )
         val_reward_fn = CustomRewardManager(
-            tokenizer=tokenizer, 
-            compute_score=config.worker.reward.compute_score, 
-            validation=True, 
-            response_length=config.data.max_response_length, 
-            batch_processing=config.worker.reward.batch_processing, 
+            tokenizer=tokenizer,
+            compute_score=config.worker.reward.compute_score,
+            validation=True,
+            response_length=config.data.max_response_length,
+            batch_processing=config.worker.reward.batch_processing,
             cos_len_reward_config=config.worker.reward.cos_len_reward_config,
             provider=config.worker.reward.provider,
             base_urls=config.worker.reward.base_urls,
             model_name=config.worker.reward.model_name,
-            api_key=config.worker.reward.api_key
+            api_key=config.worker.reward.api_key,
+            workflow_id=config.worker.reward.workflow_id,
         )
 
         trainer = RayPPOTrainer(
@@ -104,6 +112,17 @@ class Runner:
             val_reward_fn=val_reward_fn,
         )
         trainer.fit()
+
+
+import sys
+
+
+print(f"Python Executable: {sys.executable}")
+import verl
+
+
+print(f"verl __file__: {verl.__file__}")
+print(f"verl.__version__: {verl.__version__}")
 
 
 def main():
@@ -120,7 +139,17 @@ def main():
 
     if not ray.is_initialized():
         # this is for local ray cluster
-        ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}})
+        ray.init(
+            runtime_env={
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": "true",
+                    "NCCL_DEBUG": "INFO",
+                    "VLLM_LOGGING_LEVEL": "INFO",
+                    "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
+                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
+                }
+            }
+        )
 
     runner = Runner.remote()
     ray.get(runner.run.remote(ppo_config))

@@ -1,14 +1,13 @@
 """Reward functions for GRPO training."""
 
-import asyncio
-import json
 import math
 import re
 from typing import Dict
 
 from latex2sympy2_extended import NormalizationConfig
 from math_verify import LatexExtractionConfig, parse, verify
-from .r1v import r1v_format_reward, r1v_accuracy_reward
+
+from .r1v import r1v_accuracy_reward, r1v_format_reward
 
 
 def accuracy_reward(content, sol, **kwargs):
@@ -22,7 +21,11 @@ def accuracy_reward(content, sol, **kwargs):
         # We require the answer to be provided in correct latex (no malformed operators)
         content = content.strip()
         if re.search(r"<answer>(.*?)</answer>", content, re.DOTALL):
-            content = re.search(r"<answer>(.*?)</answer>", content, re.DOTALL).group(1).strip()
+            content = (
+                re.search(r"<answer>(.*?)</answer>", content, re.DOTALL)
+                .group(1)
+                .strip()
+            )
         else:
             content = content
         answer_parsed = parse(
@@ -56,6 +59,7 @@ def accuracy_reward(content, sol, **kwargs):
         print("Failed to parse gold solution: ", sol)
 
     return reward
+
 
 def get_format_reward(completion_content, **kwargs):
     """Reward function that checks if the reasoning process is enclosed within <think> and </think> tags, while the final answer is enclosed within <answer> and </answer> tags."""
@@ -103,7 +107,9 @@ def reasoning_steps_reward(completions, **kwargs):
     return [min(1.0, count / 3) for count in matches]
 
 
-def len_reward(completions: list[Dict[str, str]], solution: list[str], **kwargs) -> float:
+def len_reward(
+    completions: list[Dict[str, str]], solution: list[str], **kwargs
+) -> float:
     """Compute length-based rewards to discourage overthinking and promote token efficiency.
 
     Taken from the Kimi 1.5 tech report: https://arxiv.org/abs/2501.12599
@@ -230,7 +236,7 @@ def get_cosine_scaled_reward(
             is_correct = True
         else:
             is_correct = False
-            
+
         gen_len = len(content)
 
         # Apply cosine scaling based on length
@@ -253,7 +259,7 @@ def get_cosine_scaled_reward(
     return cosine_scaled_reward
 
 
-def get_repetition_penalty_reward(ngram_size: int=40, max_penalty: float=-0.5):
+def get_repetition_penalty_reward(ngram_size: int = 40, max_penalty: float = -0.5):
     """
     Computes N-gram repetition penalty as described in Appendix C.2 of https://arxiv.org/abs/2502.03373.
     Reference implementation from: https://github.com/eddycmu/demystify-long-cot/blob/release/openrlhf/openrlhf/reward/repetition.py
@@ -298,7 +304,10 @@ def get_repetition_penalty_reward(ngram_size: int=40, max_penalty: float=-0.5):
 
     return repetition_penalty_reward
 
-def openr1_compute_score(predict_str: str, ground_truth: str, validation: bool = False, response_length = None) -> float:
+
+def openr1_compute_score(
+    predict_str: str, ground_truth: str, validation: bool = False, response_length=None
+) -> float:
     """Compute reward score based on the completion and ground truth.
 
     Args:
@@ -307,11 +316,14 @@ def openr1_compute_score(predict_str: str, ground_truth: str, validation: bool =
     """
     acc_reward = r1v_accuracy_reward(predict_str, ground_truth, response_length)
     format_reward = r1v_format_reward(predict_str)
-    cosine_len_reward = get_cosine_scaled_reward()(predict_str, ground_truth, acc_reward)
+    cosine_len_reward = get_cosine_scaled_reward()(
+        predict_str, ground_truth, acc_reward
+    )
     repetition_penalty_reward = get_repetition_penalty_reward()(predict_str)
     if validation:
         reward = acc_reward if acc_reward == 1.0 else 0.0
     else:
-        reward = acc_reward + format_reward + cosine_len_reward + repetition_penalty_reward
+        reward = (
+            acc_reward + format_reward + cosine_len_reward + repetition_penalty_reward
+        )
     return reward
-    

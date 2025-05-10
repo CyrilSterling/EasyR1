@@ -46,7 +46,11 @@ class WandbGenerationLogger(GenerationLogger):
     def log(self, samples: List[Tuple[str, str, float]], step: int) -> None:
         # Create column names for all samples
         columns = ["step"] + sum(
-            [[f"input_{i + 1}", f"output_{i + 1}", f"score_{i + 1}"] for i in range(len(samples))], []
+            [
+                [f"input_{i + 1}", f"output_{i + 1}", f"score_{i + 1}"]
+                for i in range(len(samples))
+            ],
+            [],
         )
 
         if not hasattr(self, "validation_table"):

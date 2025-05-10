@@ -20,7 +20,9 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
-from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    FullyShardedDataParallel as FSDP,
+)
 from vllm import LLM
 from vllm.distributed import parallel_state as vllm_ps
 
@@ -61,7 +63,9 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         # get a random rng states
         if self.device_mesh is not None:
             gen_dp_rank = self.device_mesh["dp"].get_local_rank()
-            torch.cuda.manual_seed(gen_dp_rank + 1000)  # make sure all tp ranks have the same random states
+            torch.cuda.manual_seed(
+                gen_dp_rank + 1000
+            )  # make sure all tp ranks have the same random states
             self.gen_random_states = torch.cuda.get_rng_state()
             torch.cuda.set_rng_state(self.torch_random_states)
         else:
@@ -87,13 +91,17 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         print_gpu_memory_usage("After state_dict() in sharding manager")
 
         self.inference_engine.wake_up()
-        model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        model = (
+            self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        )
         model.load_weights(self._make_weight_iterator(actor_weights))
         print_gpu_memory_usage("After sync model weights in sharding manager")
 
         del actor_weights
         torch.cuda.empty_cache()
-        print_gpu_memory_usage("After del state_dict and empty_cache in sharding manager")
+        print_gpu_memory_usage(
+            "After del state_dict and empty_cache in sharding manager"
+        )
         # important: need to manually set the random states of each tp to be identical.
         if self.device_mesh is not None:
             self.torch_random_states = torch.cuda.get_rng_state()
