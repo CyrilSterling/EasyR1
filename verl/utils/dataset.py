@@ -116,11 +116,14 @@ class RLHFDataset(Dataset, ImageProcessMixin):
             data_split = "train"
 
         if os.path.isdir(data_path):
-            if any(filename.endswith(".parquet") for filename in os.listdir(data_path)):
+            file_names = list(os.listdir(data_path))
+            if os.path.isdir(data_path + "/data"):
+                file_names += list(os.listdir(data_path + "/data"))
+            if any(filename.endswith(".parquet") for filename in file_names):
                 self.dataset = load_dataset(
                     "parquet", data_dir=data_path, split="train"
                 )
-            elif any(filename.endswith(".arrow") for filename in os.listdir(data_path)):
+            elif any(filename.endswith(".arrow") for filename in file_names):
                 # load_from_disk, arrow format
                 self.dataset = HFDataset.load_from_disk(data_path)
             else:
@@ -156,12 +159,9 @@ class RLHFDataset(Dataset, ImageProcessMixin):
             images = [
                 self.process_image(image) for image in row_dict.pop(self.image_key)
             ]
-            try:
-                model_inputs = self.processor(
-                    images, [prompt], add_special_tokens=False, return_tensors="pt"
-                )
-            except Exception:
-                breakpoint()
+            model_inputs = self.processor(
+                images, [prompt], add_special_tokens=False, return_tensors="pt"
+            )
             input_ids = model_inputs.pop("input_ids")[0]
             attention_mask = model_inputs.pop("attention_mask")[0]
             row_dict["multi_modal_data"] = {"image": images}

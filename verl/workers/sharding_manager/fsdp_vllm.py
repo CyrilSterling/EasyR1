@@ -37,6 +37,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         module: FSDP,
         inference_engine: LLM,
         device_mesh: DeviceMesh = None,
+        disable_sleep: bool = False,
     ):
         self.module = module
         self.inference_engine = inference_engine
@@ -53,6 +54,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         self.tp_size = vllm_ps.get_tensor_model_parallel_world_size()
         self.tp_rank = vllm_ps.get_tensor_model_parallel_rank()
         self.tp_group = vllm_ps.get_tensor_model_parallel_group().device_group
+
+        self.disable_sleep = disable_sleep
 
         # Record freed bytes to estimate memory usage correctly
         # https://github.com/vllm-project/vllm/pull/11743#issuecomment-2754338119

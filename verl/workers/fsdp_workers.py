@@ -554,9 +554,6 @@ class FSDPWorker(Worker):
     def generate_sequences(self, prompts: DataProto):
         assert self._is_rollout
 
-        disable_sleep = None
-        if "disable_sleep" in prompts.meta_info:
-            disable_sleep = prompts.meta_info["disable_sleep"]
 
         if self._use_param_offload:
             load_fsdp_model(self.fsdp_module)
@@ -575,12 +572,17 @@ class FSDPWorker(Worker):
         }
         prompts.meta_info.update(meta_info)
 
+        
+        disable_sleep = None
+        if "disable_sleep" in prompts.meta_info:
+            disable_sleep = prompts.meta_info["disable_sleep"]
+
         @contextmanager
         def maybe_disable_sleep_context():
             if disable_sleep is None:
                 yield
             else:
-                orig_disable_sleep = self.rollout_sharding_manager.non_sleep
+                orig_disable_sleep = self.rollout_sharding_manager.disable_sleep
                 self.rollout_sharding_manager.non_sleep = disable_sleep
                 try:
                     yield

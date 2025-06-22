@@ -839,8 +839,8 @@ class RayPPOTrainer:
             ),
             shuffle=False,
             num_workers=32,
-            collate_fn=collate_fn,
             pin_memory=True,
+            collate_fn=collate_fn,
             drop_last=False,
         )
 
