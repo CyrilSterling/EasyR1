@@ -452,6 +452,44 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
         self.cached_mixed_indices = None
         # Note: We don't reset random indices - this preserves their state between updates
 
+    def state_dict(self):
+        """Return the state dictionary for checkpointing."""
+        return {
+            'consumed_batches': self.consumed_batches,
+            'random_indices_pool': self.random_indices_pool,
+            'random_indices_position': self.random_indices_position,
+            'weights': self.weights.clone() if torch.is_tensor(self.weights) else self.weights,
+            'generator_state': self.generator.get_state() if self.generator is not None else None,
+        }
+
+    def load_state_dict(self, state_dict):
+        """Load state from a state dictionary."""
+        self.consumed_batches = state_dict.get('consumed_batches', 0)
+        self.random_indices_pool = state_dict.get('random_indices_pool', list(range(len(self.dataset))))
+        self.random_indices_position = state_dict.get('random_indices_position', 0)
+        self.weights = state_dict.get('weights', self.weights)
+        
+        # Restore generator state if available
+        if state_dict.get('generator_state') is not None and self.generator is not None:
+            try:
+                self.generator.set_state(state_dict['generator_state'])
+            except Exception as e:
+                print(f"Warning: Could not restore generator state: {e}")
+        
+        # Update the weighted sampler with restored weights
+        self.weighted_sampler = WeightedRandomSampler(
+            weights=self.weights,
+            num_samples=self.dataset_size,
+            replacement=self.replacement,
+            generator=self.generator,
+        )
+        
+        # Reset cached indices to force regeneration with restored state
+        self.cached_mixed_indices = None
+        
+        print(f"Restored curriculum sampler state: consumed_batches={self.consumed_batches}, "
+              f"random_indices_position={self.random_indices_position}")
+
 
 class PaddedSequentialSampler(torch.utils.data.BatchSampler):
     """Custom sampler that pads each batch to the same batch size."""
@@ -623,6 +661,10 @@ class RayPPOTrainer:
                 "Rollout batch size must be divisible by global batch size."
             )
 
+        # Track resuming state for proper curriculum handling
+        self.is_resuming_from_checkpoint = False
+        self.curriculum_state_to_restore = None
+
         # Initialize workers first
         self.init_workers()
 
@@ -647,8 +689,20 @@ class RayPPOTrainer:
         # breakpoint()
         # Initialize sampler based on configured strategy
         if self.config.data.sampling_strategy == "curriculum":
-            # Initialize curriculum learning weights
-            self._init_curriculum_weights()
+            # Handle resuming from checkpoint
+            if self.is_resuming_from_checkpoint and self.curriculum_state_to_restore is not None:
+                # Restore curriculum weights from checkpoint
+                if 'curriculum_weights' in self.curriculum_state_to_restore:
+                    self.curriculum_weights = self.curriculum_state_to_restore['curriculum_weights']
+                    # Store weights in dataset for access during training
+                    self.train_dataset.curriculum_weights = self.curriculum_weights
+                    print("Restored curriculum weights from checkpoint")
+                else:
+                    print("Warning: curriculum_weights not found in checkpoint, initializing from scratch")
+                    self._init_curriculum_weights()
+            else:
+                # Initialize curriculum learning weights from scratch
+                self._init_curriculum_weights()
 
             # Create mixed curriculum sampler
             self.curriculum_sampler = MixedCurriculumSampler(
@@ -659,6 +713,13 @@ class RayPPOTrainer:
                 replacement=True,  # Always use replacement for weighted sampling
                 generator=torch.Generator().manual_seed(self.config.data.seed),
             )
+            
+            # Restore sampler state if resuming from checkpoint
+            if self.is_resuming_from_checkpoint and self.curriculum_state_to_restore is not None:
+                if 'sampler_state' in self.curriculum_state_to_restore:
+                    self.curriculum_sampler.load_state_dict(self.curriculum_state_to_restore['sampler_state'])
+                    print("Restored curriculum sampler state from checkpoint")
+            
             sampler = self.curriculum_sampler
         elif self.config.data.sampling_strategy == "shuffle":
             train_dataloader_generator = torch.Generator()
@@ -722,6 +783,12 @@ class RayPPOTrainer:
         self.config.worker.actor.optim.training_steps = training_steps
         self.config.worker.critic.optim.training_steps = training_steps
         print(f"Total training steps: {self.training_steps}")
+
+        # Clean up resuming state after dataloader creation
+        if self.is_resuming_from_checkpoint:
+            self.is_resuming_from_checkpoint = False
+            self.curriculum_state_to_restore = None
+            print("Completed checkpoint resuming process")
 
     def _calculate_curriculum_metric(self, batch: DataProto) -> Dict:
         """Calculate the curriculum metric based on the configured strategy.
@@ -926,7 +993,7 @@ class RayPPOTrainer:
             momentum * self.curriculum_weights + (1 - momentum) * new_weights
         )
 
-        # Update sampler weights
+        # Update sampler weights (this preserves sampler state internally)
         self.curriculum_sampler.update_weights(self.curriculum_weights)
 
         # Store updated weights in dataset
@@ -935,16 +1002,9 @@ class RayPPOTrainer:
         # Save updated weights
         self._save_curriculum_weights(self.curriculum_weights, step=self.global_step)
 
-        # Create a new dataloader with the updated sampler
-        self.train_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.rollout_batch_size,
-            sampler=self.curriculum_sampler,  # Using the updated sampler
-            num_workers=32,
-            collate_fn=collate_fn,
-            pin_memory=False,
-            drop_last=True,
-        )
+        # Note: We don't need to recreate the dataloader since update_weights() 
+        # only updates the internal weighted sampler while preserving all state.
+        # The existing dataloader will use the updated sampler automatically.
 
         # Set flag to signal that the dataloader iterator needs to be refreshed
         self.refresh_dataloader_iterator = True
@@ -1152,6 +1212,16 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_path)
 
+        # Save curriculum learning state if using curriculum strategy
+        if self.config.data.sampling_strategy == "curriculum" and hasattr(self, 'curriculum_sampler'):
+            curriculum_state = {
+                'curriculum_weights': self.curriculum_weights,
+                'sampler_state': self.curriculum_sampler.state_dict(),
+            }
+            curriculum_path = os.path.join(folder_path, "curriculum_state.pt")
+            torch.save(curriculum_state, curriculum_path)
+            print(f"Saved curriculum state to {curriculum_path}")
+
         last_global_step_path = os.path.join(
             self.config.trainer.save_checkpoint_path, CHECKPOINT_TRACKER
         )
@@ -1196,6 +1266,19 @@ class RayPPOTrainer:
                 "global_step_"
             )[-1]
         )
+        
+        # Load curriculum state first if using curriculum strategy
+        if self.config.data.sampling_strategy == "curriculum":
+            curriculum_path = os.path.join(
+                self.config.trainer.load_checkpoint_path, "curriculum_state.pt"
+            )
+            if os.path.exists(curriculum_path):
+                self.curriculum_state_to_restore = torch.load(curriculum_path, weights_only=False)
+                self.is_resuming_from_checkpoint = True
+                print(f"Loaded curriculum state from {curriculum_path}")
+            else:
+                print(f"No curriculum state found at {curriculum_path}, will initialize from scratch.")
+        
         actor_path = os.path.join(self.config.trainer.load_checkpoint_path, "actor")
         self.actor_rollout_wg.load_checkpoint(actor_path)
         if self.use_critic:
@@ -1261,6 +1344,11 @@ class RayPPOTrainer:
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+
+        # Recreate dataloader if we loaded curriculum state from checkpoint
+        if self.is_resuming_from_checkpoint and self.config.data.sampling_strategy == "curriculum":
+            print("Recreating dataloader with restored curriculum state...")
+            self._create_dataloader()
 
         # perform validation before training
         if self.val_reward_fn is not None and self.config.trainer.val_before_train:
