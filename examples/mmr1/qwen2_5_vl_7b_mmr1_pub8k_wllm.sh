@@ -1,9 +1,4 @@
-# Activate the virtual environment
-if [ -f "../.venv/bin/activate" ]; then
-  source ../.venv/bin/activate
-else
-  echo "Warning: ../.venv/bin/activate not found"
-fi
+source .venv/bin/activate
 
 set -x
 which python
@@ -16,7 +11,7 @@ else
   echo "Warning: .env file not found"
 fi
 
-MODEL_PATH=Qwen/Qwen2.5-VL-7B-Instruct # replace it with your local file path
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct} # replace it with your local file path
 echo $MODEL_PATH
 
 SYSTEM_PROMPT="""A conversation between User and Assistant. 
@@ -42,22 +37,28 @@ SUBMISSION_ID=${JOB_NAME}_$(date +%s)
 RUNTIME_ENV=$(cat <<EOF | jq -c '.'
 {
   "env_vars": {
-    "HF_HUB_CACHE": "/mnt/amlfs-02/shared/ckpts/mmc/",
+    "HF_HUB_CACHE": "/mnt/amlfs-02/shared/ckpts/mmn/",
+    "HF_HUB_OFFLINE": "1",
+    "RAY_ENABLE_RECORD_ACTOR_TASK_LOGGING": "1",
+    "RAY_task_retry_delay_ms": "30000",
     "WANDB_API_KEY": "26dcd5fab9afa1c6f127a04db6e0af6521affbbb",
-    "WANDB_ENTITY": "mmo1"
-  }
+    "WANDB_ENTITY": "mmo1",
+    "PATH": "/mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/rl/.venv/bin:$PATH"
+  },
+  "py_executable": "/mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/rl/.venv/bin/python"
 }
 EOF
 )
 mkdir -p /workspace/empty/
 
-WORKDIR=$PWD
+WORKDIR=$PWD/EasyR1
 
-RAY_ADDRESS='http://127.0.0.1:8265' ray job submit \
+RAY_ADDRESS='http://127.0.0.1:8300' ray job submit \
   --working-dir /workspace/empty/ \
   --log-style pretty \
-  --runtime-env-json "$RUNTIME_ENV" \
   --submission-id ${SUBMISSION_ID} \
+  --runtime-env-json $RUNTIME_ENV \
+  --no-wait \
   -- \
   cd $WORKDIR \; \
   python -m verl.trainer.main \

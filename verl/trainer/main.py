@@ -147,6 +147,11 @@ def main():
                     "VLLM_LOGGING_LEVEL": "INFO",
                     "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
                     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
+                    # "HF_HUB_CACHE": "/mnt/amlfs-02/shared/ckpts/mmn/",
+                    # "HF_HUB_OFFLINE": "1",
+                    # "WANDB_API_KEY": "26dcd5fab9afa1c6f127a04db6e0af6521affbbb",
+                    # "WANDB_ENTITY": "mmo1",
+                    # "PATH": "/mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/rl/.venv/bin:$PATH",
                 }
             }
         )

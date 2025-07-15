@@ -1,4 +1,4 @@
-source ../.venv_v2/bin/activate
+source .venv/bin/activate
 set -x
 
 which python

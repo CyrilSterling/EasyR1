@@ -54,6 +54,7 @@ def before_retry_fn(retry_state):
         print(
             f"Retrying API call. Attempt #{retry_state.attempt_number}, f{retry_state}"
         )
+        breakpoint()
 
 
 async def deal_tasks(tasks, max_concurrent_tasks=256):

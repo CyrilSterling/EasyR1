@@ -37,8 +37,8 @@ algorithm:
 worker:
   actor:
     global_batch_size: 128
-    micro_batch_size_per_device_for_update: 1
-    micro_batch_size_per_device_for_experience: 4
+    micro_batch_size_per_device_for_update: 4
+    micro_batch_size_per_device_for_experience: 8
     max_grad_norm: 1.0
     padding_free: true
     ulysses_sequence_parallel_size: 1
@@ -49,11 +49,11 @@ worker:
       freeze_vision_tower: false
     optim:
       lr: 1.0e-6
-      weight_decay: 1.0e-2
+      weight_decay: 1.0e-3
       strategy: adamw  # {adamw, adamw_bf16}
       lr_warmup_ratio: 0.0
     fsdp:
-      fsdp_size: 8
+      fsdp_size: 4
       enable_full_shard: true
       enable_cpu_offload: false
       enable_rank0_init: true
@@ -100,10 +100,16 @@ worker:
     model_name: Qwen2.5-7B-Instruct
     api_key: EMPTY
     cos_len_reward_config: # [-1.0,-0.5,0.5,1.0]
-      min_value_wrong: -1.0
-      max_value_wrong: -0.5
-      min_value_correct: 0.5
-      max_value_correct: 1.0
+      # min_value_wrong: -1.0
+      # max_value_wrong: -0.5
+      # min_value_correct: 0.5
+      # max_value_correct: 1.0
+
+      # disable by default
+      min_value_wrong: 0.0
+      max_value_wrong: 0.0
+      min_value_correct: 0.0
+      max_value_correct: 0.0
 
 trainer:
   total_episodes: 15
