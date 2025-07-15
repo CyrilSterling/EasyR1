@@ -5,12 +5,17 @@ import math
 import multiprocessing as mp
 import re
 import subprocess
-from typing import List
+import time
+from typing import List, Optional
+import logging
 
 from mathruler.grader import extract_boxed_content
 
 from .gpt_as_judge import get_compare_messages, openai_llm
 from .r1v import r1v_accuracy_only_reward, r1v_accuracy_reward
+from .resilience import EndpointManager, CircuitBreakerConfig
+
+logger = logging.getLogger(__name__)
 
 
 def format_reward_batch(completion_contents, **kwargs):
@@ -335,6 +340,25 @@ def accuracy_reward_batch_vllm(
         )
         for url in base_urls
     ]
+    
+    # Setup endpoint manager with circuit breaker for resilience
+    circuit_config = CircuitBreakerConfig(
+        failure_threshold=3,  # Open circuit after 3 failures
+        success_threshold=2,  # Close circuit after 2 successes
+        timeout=30.0,  # Wait 30 seconds before retrying
+        window_size=10
+    )
+    
+    endpoint_manager = EndpointManager(
+        endpoints=base_urls,
+        circuit_config=circuit_config,
+        health_check_interval=30.0,
+        health_check_timeout=10.0
+    )
+    
+    # Setup endpoint manager for each client
+    for client in vllm_clients:
+        client.setup_endpoint_manager(base_urls, circuit_config)
 
     # Create messages for each answer that needs verification
     message_list = []
@@ -348,44 +372,111 @@ def accuracy_reward_batch_vllm(
     num_clients = len(vllm_clients)
 
     async def process_messages_in_parallel():
-        # Split messages among clients
-        message_chunks = [[] for _ in range(num_clients)]
+        # Filter for healthy endpoints only
+        healthy_endpoints = endpoint_manager.get_healthy_endpoints()
+        healthy_clients = []
+        healthy_client_urls = []
+        
+        for i, client in enumerate(vllm_clients):
+            if base_urls[i] in healthy_endpoints:
+                healthy_clients.append(client)
+                healthy_client_urls.append(base_urls[i])
+        
+        if not healthy_clients:
+            logger.error("No healthy endpoints available for processing")
+            return ["<judge>1</judge>"] * len(message_list)
+        
+        logger.info(f"Using {len(healthy_clients)} healthy endpoints: {healthy_client_urls}")
+        
+        # Split messages among healthy clients only
+        num_healthy_clients = len(healthy_clients)
+        message_chunks = [[] for _ in range(num_healthy_clients)]
         client_to_orig_idx = (
             {}
         )  # Maps (client_idx, chunk_position) to original message index
 
-        # Distribute messages across clients
+        # Distribute messages across healthy clients
         for i, msg in enumerate(message_list):
-            client_idx = i % num_clients
+            client_idx = i % num_healthy_clients
             chunk_pos = len(message_chunks[client_idx])
             message_chunks[client_idx].append(msg)
             client_to_orig_idx[(client_idx, chunk_pos)] = i
 
         # Process chunks in parallel
         tasks = []
-        for i, client in enumerate(vllm_clients):
+        for i, client in enumerate(healthy_clients):
             if message_chunks[i]:  # Only create tasks for chunks with messages
                 tasks.append(client.generate_outputs_async(message_chunks[i]))
 
-        # Wait for all tasks to complete
-        results = await asyncio.gather(*tasks)
+        # Wait for all tasks to complete with timeout
+        timeout_seconds = kwargs.get("batch_timeout", 600)  # 10 minutes default timeout
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Batch processing timed out after {timeout_seconds} seconds")
+            # Return default failed responses for all messages
+            return ["<judge>1</judge>"] * len(message_list)
 
         # Create output array with correct size
         vllm_outputs = ["<judge>1</judge>"] * len(message_list)
 
-        # Map results back to their original positions
+        # Map results back to their original positions, handling exceptions
         for client_idx, client_results in enumerate(results):
+            if isinstance(client_results, Exception):
+                # If this client failed entirely, log it and skip (defaults already set)
+                logger.error(f"Client {client_idx} failed completely: {client_results}")
+                continue
+                
             for chunk_pos, result in enumerate(client_results):
                 orig_idx = client_to_orig_idx.get((client_idx, chunk_pos))
-                vllm_outputs[orig_idx] = result
+                if orig_idx is not None:
+                    vllm_outputs[orig_idx] = result
 
         # Give a short delay to ensure all HTTP connections can complete properly
         await asyncio.sleep(1)
 
         return vllm_outputs
 
-    # Run parallel processing
-    vllm_outputs = asyncio.run(process_messages_in_parallel())
+    # Run parallel processing with health checks
+    async def run_with_health_checks():
+        # Start health checks for endpoints
+        await endpoint_manager.start_health_checks()
+        
+        try:
+            # Log initial endpoint health
+            healthy_endpoints = endpoint_manager.get_healthy_endpoints()
+            endpoint_stats = endpoint_manager.get_endpoint_stats()
+            logger.info(f"Starting batch processing with {len(healthy_endpoints)} healthy endpoints: {healthy_endpoints}")
+            
+            # Log detailed endpoint statistics
+            for endpoint, stats in endpoint_stats.items():
+                logger.info(f"Endpoint {endpoint}: healthy={stats['healthy']}, "
+                          f"circuit_state={stats['circuit_state']}, "
+                          f"success_rate={stats['success_rate']:.2f}, "
+                          f"total_requests={stats['total_requests']}")
+            
+            # Run the actual processing
+            results = await process_messages_in_parallel()
+            
+            # Log final endpoint statistics
+            final_stats = endpoint_manager.get_endpoint_stats()
+            logger.info("Final endpoint statistics after batch processing:")
+            for endpoint, stats in final_stats.items():
+                logger.info(f"Endpoint {endpoint}: healthy={stats['healthy']}, "
+                          f"circuit_state={stats['circuit_state']}, "
+                          f"success_rate={stats['success_rate']:.2f}, "
+                          f"total_requests={stats['total_requests']}, "
+                          f"failed_requests={stats['failed_requests']}")
+            
+            return results
+        finally:
+            # Stop health checks when done
+            await endpoint_manager.stop_health_checks()
+    
+    vllm_outputs = asyncio.run(run_with_health_checks())
 
     vllm_corrects_num = 0
 

@@ -1,0 +1,52 @@
+{
+  "config": {
+    "num_workers": 4,
+    "requests_per_worker": 5,
+    "batch_size": 8,
+    "timeout_seconds": 30,
+    "healthy_endpoints": [
+      "http://10.244.174.221:30000/v1",
+      "http://10.244.174.221:30001/v1",
+      "http://10.244.174.221:30002/v1",
+      "http://10.244.174.221:30003/v1",
+      "http://10.244.174.221:30004/v1",
+      "http://10.244.174.221:30005/v1",
+      "http://10.244.174.221:30006/v1",
+      "http://10.244.174.221:30007/v1"
+    ],
+    "unhealthy_endpoints": [
+      "http://invalid-endpoint-1:8000/v1",
+      "http://invalid-endpoint-2:8000/v1",
+      "http://10.244.174.221:99999/v1"
+    ]
+  },
+  "total_duration": 0.5715363025665283,
+  "total_requests": 0,
+  "successful_requests": 0,
+  "failed_requests": 0,
+  "success_rate": 0,
+  "requests_per_second": 0.0,
+  "worker_summaries": [
+    {
+      "worker_id": 0,
+      "status": "failed",
+      "error": "The actor died because of an error raised in its creation task, \u001b[36mray::StressTestWorker.__init__()\u001b[39m (pid=22813, ip=10.244.143.116, actor_id=8f6adb7d87b43099f764678303000000, repr=<ray_stress_test.FunctionActorManager._create_fake_actor_class.<locals>.TemporaryActor object at 0x7f2c93cef880>)\nray.exceptions.ActorDiedError: The actor died unexpectedly before finishing this task.\n\tclass_name: TemporaryActor\n\tactor_id: 8f6adb7d87b43099f764678303000000\nFailed to create actor. You set the async flag, but the actor does not have any coroutine functions."
+    },
+    {
+      "worker_id": 1,
+      "status": "failed",
+      "error": "The actor died because of an error raised in its creation task, \u001b[36mray::StressTestWorker.__init__()\u001b[39m (pid=23716, ip=10.244.69.4, actor_id=e8fd9fa4036613f552b0f8e403000000, repr=<ray_stress_test.FunctionActorManager._create_fake_actor_class.<locals>.TemporaryActor object at 0x7f894b05f850>)\nray.exceptions.ActorDiedError: The actor died unexpectedly before finishing this task.\n\tclass_name: TemporaryActor\n\tactor_id: e8fd9fa4036613f552b0f8e403000000\nFailed to create actor. You set the async flag, but the actor does not have any coroutine functions."
+    },
+    {
+      "worker_id": 2,
+      "status": "failed",
+      "error": "The actor died because of an error raised in its creation task, \u001b[36mray::StressTestWorker.__init__()\u001b[39m (pid=21749, ip=10.244.172.193, actor_id=fda9f586d7a0bcade55abea603000000, repr=<ray_stress_test.FunctionActorManager._create_fake_actor_class.<locals>.TemporaryActor object at 0x7f7411f4f940>)\nray.exceptions.ActorDiedError: The actor died unexpectedly before finishing this task.\n\tclass_name: TemporaryActor\n\tactor_id: fda9f586d7a0bcade55abea603000000\nFailed to create actor. You set the async flag, but the actor does not have any coroutine functions."
+    },
+    {
+      "worker_id": 3,
+      "status": "failed",
+      "error": "The actor died because of an error raised in its creation task, \u001b[36mray::StressTestWorker.__init__()\u001b[39m (pid=26327, ip=10.244.152.174, actor_id=d0616c968f935092dcf364d003000000, repr=<ray_stress_test.FunctionActorManager._create_fake_actor_class.<locals>.TemporaryActor object at 0x7f0817bbb700>)\nray.exceptions.ActorDiedError: The actor died unexpectedly before finishing this task.\n\tclass_name: TemporaryActor\n\tactor_id: d0616c968f935092dcf364d003000000\nFailed to create actor. You set the async flag, but the actor does not have any coroutine functions."
+    }
+  ],
+  "batch_results": []
+}

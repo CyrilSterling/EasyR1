@@ -1,11 +1,19 @@
 import asyncio
 import json
 import os
+import httpx
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AzureOpenAI, OpenAI
-from tenacity import retry, stop_after_attempt, wait_fixed
+from openai import APIError, APITimeoutError, APIConnectionError, RateLimitError
+from tenacity import retry, stop_after_attempt, wait_fixed, wait_exponential, retry_if_exception_type
 from tqdm.asyncio import tqdm_asyncio
+import logging
+import time
+from .resilience import EndpointManager, CircuitBreakerConfig
+
+logger = logging.getLogger(__name__)
 
 
 def get_compare_messages(question, response, answer):
@@ -51,10 +59,10 @@ class fake_response:
 
 def before_retry_fn(retry_state):
     if retry_state.attempt_number > 1:
-        print(
-            f"Retrying API call. Attempt #{retry_state.attempt_number}, f{retry_state}"
+        logger.warning(
+            f"Retrying API call. Attempt #{retry_state.attempt_number}, "
+            f"Last exception: {retry_state.outcome.exception()}"
         )
-        breakpoint()
 
 
 async def deal_tasks(tasks, max_concurrent_tasks=256):
@@ -92,6 +100,7 @@ class openai_llm:
 
         self.provider = provider
         self.token_log_file = "./logs/token.json"
+        self.endpoint_manager = None  # Will be set up for vLLM
 
         if provider == "azure":
             # Azure OpenAI settings
@@ -125,12 +134,64 @@ class openai_llm:
                 f"Creating VLLM client with base_url: {self.base_url}, model_name: {self.model}, api_key: {self.api_key}"
             )
 
+            # Configure HTTP client with proper timeouts and connection limits
+            timeout = httpx.Timeout(
+                connect=10.0,  # Connection timeout
+                read=60.0,     # Read timeout
+                write=10.0,    # Write timeout
+                pool=300.0     # Pool timeout (overall timeout)
+            )
+            
+            limits = httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=30.0
+            )
+            
+            # Create HTTP client with proper configuration
+            http_client = httpx.Client(timeout=timeout, limits=limits)
+            async_http_client = httpx.AsyncClient(timeout=timeout, limits=limits)
+
             # Initialize client without api_key if it's None
             api_key_args = {} if self.api_key is None else {"api_key": self.api_key}
-            self.client = OpenAI(base_url=self.base_url, **api_key_args)
-            self.async_client = AsyncOpenAI(base_url=self.base_url, **api_key_args)
+            self.client = OpenAI(
+                base_url=self.base_url, 
+                http_client=http_client,
+                max_retries=2,  # Limit retries at client level
+                **api_key_args
+            )
+            self.async_client = AsyncOpenAI(
+                base_url=self.base_url, 
+                http_client=async_http_client,
+                max_retries=2,  # Limit retries at client level
+                **api_key_args
+            )
         else:
             raise ValueError(f"Unsupported provider: {provider}. Use 'azure' or 'vllm'")
+
+    def setup_endpoint_manager(self, endpoints: List[str], circuit_config: Optional[CircuitBreakerConfig] = None):
+        """Setup endpoint manager for vLLM endpoints with circuit breaker support."""
+        if self.provider == "vllm":
+            self.endpoint_manager = EndpointManager(
+                endpoints=endpoints,
+                circuit_config=circuit_config or CircuitBreakerConfig()
+            )
+            logger.info(f"Setup endpoint manager for {len(endpoints)} vLLM endpoints")
+        else:
+            logger.warning("Endpoint manager only supported for vLLM provider")
+    
+    def get_endpoint_health(self) -> Optional[dict]:
+        """Get health statistics for all endpoints."""
+        if self.endpoint_manager:
+            return self.endpoint_manager.get_endpoint_stats()
+        return None
+    
+    def is_endpoint_healthy(self) -> bool:
+        """Check if the current endpoint is healthy."""
+        if self.endpoint_manager:
+            healthy_endpoints = self.endpoint_manager.get_healthy_endpoints()
+            return self.base_url in healthy_endpoints
+        return True  # Assume healthy if no endpoint manager
 
     def cal_cost(self, response, **kwargs):
         if not os.path.exists(self.token_log_file):
@@ -160,50 +221,110 @@ class openai_llm:
         with open(self.token_log_file, "w") as f:
             json.dump(tokens, f)
 
-    @retry(wait=wait_fixed(3), stop=stop_after_attempt(5), before=before_retry_fn)
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(3),  # Reduced from 5 to 3 attempts
+        before=before_retry_fn,
+        retry=retry_if_exception_type((
+            TimeoutError, ConnectionError, httpx.TimeoutException, httpx.ConnectError,
+            APITimeoutError, APIConnectionError, RateLimitError
+        ))
+    )
     def response(self, messages, **kwargs):
         model = kwargs.get("model", self.model)
+        start_time = time.time()
 
-        response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            n=kwargs.get("n", 1),
-            temperature=kwargs.get("temperature", 0),
-            max_tokens=kwargs.get("max_tokens", 4000),
-            timeout=kwargs.get("timeout", 180),
-        )
-        # self.cal_cost(response,**kwargs)
-        return response.choices[0].message.content
+        try:
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                n=kwargs.get("n", 1),
+                temperature=kwargs.get("temperature", 0),
+                max_tokens=kwargs.get("max_tokens", 4000),
+                timeout=kwargs.get("timeout", 180),
+            )
+            
+            # Record success if endpoint manager is available
+            if self.endpoint_manager and self.provider == "vllm":
+                response_time = time.time() - start_time
+                self.endpoint_manager.record_request_success(self.base_url, response_time)
+            
+            # self.cal_cost(response,**kwargs)
+            return response.choices[0].message.content
+        except Exception as e:
+            # Record failure if endpoint manager is available
+            if self.endpoint_manager and self.provider == "vllm":
+                self.endpoint_manager.record_request_failure(self.base_url)
+            raise
 
-    @retry(wait=wait_fixed(3), stop=stop_after_attempt(5), before=before_retry_fn)
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(3),  # Reduced from 5 to 3 attempts
+        before=before_retry_fn,
+        retry=retry_if_exception_type((
+            TimeoutError, ConnectionError, httpx.TimeoutException, httpx.ConnectError,
+            APITimeoutError, APIConnectionError, RateLimitError
+        ))
+    )
     async def response_async(self, messages, **kwargs):
         model = kwargs.get("model", self.model)
+        start_time = time.time()
 
-        response = await self.async_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            n=kwargs.get("n", 1),
-            temperature=kwargs.get("temperature", 0),
-            max_tokens=kwargs.get("max_tokens", 4096),
-            timeout=kwargs.get("timeout", 180),
-        )
-        # self.cal_cost(response,**kwargs)
-        return response.choices[0].message.content
+        try:
+            response = await self.async_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                n=kwargs.get("n", 1),
+                temperature=kwargs.get("temperature", 0),
+                max_tokens=kwargs.get("max_tokens", 4096),
+                timeout=kwargs.get("timeout", 180),
+            )
+            
+            # Record success if endpoint manager is available
+            if self.endpoint_manager and self.provider == "vllm":
+                response_time = time.time() - start_time
+                self.endpoint_manager.record_request_success(self.base_url, response_time)
+            
+            # self.cal_cost(response,**kwargs)
+            return response.choices[0].message.content
+        except Exception as e:
+            # Record failure if endpoint manager is available
+            if self.endpoint_manager and self.provider == "vllm":
+                self.endpoint_manager.record_request_failure(self.base_url)
+            raise
 
     def generate_output(self, messages, **kwargs):
         try:
             response = self.response(messages, **kwargs)
-        except Exception as e:
+        except (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.ConnectError,
+                APITimeoutError, APIConnectionError, RateLimitError) as e:
             response = "<judge>1</judge>"  # if failed, return not match
-            print(f"get {kwargs.get('model', self.model)} response failed: {e}")
+            logger.error(f"Retryable error for {kwargs.get('model', self.model)}: {type(e).__name__}: {e}")
+        except APIError as e:
+            # Non-retryable API errors (like invalid request format, auth issues, etc.)
+            response = "<judge>1</judge>"  # if failed, return not match
+            logger.error(f"API error for {kwargs.get('model', self.model)}: {e}")
+        except Exception as e:
+            # Catch-all for truly unexpected errors, but log them distinctly
+            response = "<judge>1</judge>"  # if failed, return not match
+            logger.error(f"Unexpected error for {kwargs.get('model', self.model)}: {type(e).__name__}: {e}")
         return response
 
     async def generate_output_async(self, idx, messages, **kwargs):
         try:
             response = await self.response_async(messages, **kwargs)
-        except Exception as e:
+        except (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.ConnectError,
+                APITimeoutError, APIConnectionError, RateLimitError) as e:
             response = "<judge>1</judge>"  # if failed, return not match
-            print(f"get {kwargs.get('model', self.model)} response failed: {e}")
+            logger.error(f"Retryable error for {kwargs.get('model', self.model)} at index {idx}: {type(e).__name__}: {e}")
+        except APIError as e:
+            # Non-retryable API errors (like invalid request format, auth issues, etc.)
+            response = "<judge>1</judge>"  # if failed, return not match
+            logger.error(f"API error for {kwargs.get('model', self.model)} at index {idx}: {e}")
+        except Exception as e:
+            # Catch-all for truly unexpected errors, but log them distinctly
+            response = "<judge>1</judge>"  # if failed, return not match
+            logger.error(f"Unexpected error for {kwargs.get('model', self.model)} at index {idx}: {type(e).__name__}: {e}")
         return idx, response
 
     def generate_outputs(self, messages, **kwargs):
