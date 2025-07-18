@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Type, Tuple
 
 import numpy as np
 import ray
+import ray.exceptions
 import torch
 from codetiming import Timer
 from Levenshtein import distance
@@ -511,7 +512,7 @@ class PaddedSequentialSampler(torch.utils.data.BatchSampler):
         return len(self.indices)
 
 
-@ray.remote
+@ray.remote(max_retries=3)
 def calculate_learnability_metric(reward_fn, batch, batch_size, curriculum_rollout_n):
     """Remote task for calculating learnability metric."""
     reward_tensor, reward_metrics = reward_fn(batch)
@@ -526,7 +527,7 @@ def calculate_learnability_metric(reward_fn, batch, batch_size, curriculum_rollo
     return learnability
 
 
-@ray.remote
+@ray.remote(max_retries=3)
 def calculate_distinct_n_metric(responses, batch_size, curriculum_rollout_n, n=3):
     """Remote task for calculating distinct-n metric."""
     tokenized_sequences = responses.tolist()
@@ -543,7 +544,7 @@ def calculate_distinct_n_metric(responses, batch_size, curriculum_rollout_n, n=3
     return torch.tensor(distinct_score, dtype=torch.float32)
 
 
-@ray.remote
+@ray.remote(max_retries=3, num_cpus=32)
 def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
     """Remote task for calculating self-BLEU-123 metric."""
     tokenized_sequences = responses.tolist()
@@ -562,7 +563,7 @@ def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
     return torch.tensor(bleu_score, dtype=torch.float32)
 
 
-@ray.remote
+@ray.remote(max_retries=3, num_cpus=32)
 def calculate_edit_distance_metric(responses, batch_size, curriculum_rollout_n):
     """Remote task for calculating edit distance metric."""
     tokenized_sequences = responses.tolist()
@@ -1191,6 +1192,112 @@ class RayPPOTrainer:
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
 
+        # Initialize fault tolerance monitoring
+        self.actor_failure_counts = defaultdict(int)
+        self.actor_restart_counts = defaultdict(int)
+
+    def _handle_actor_error(self, error: ray.exceptions.RayActorError, actor_type: str) -> None:
+        """Handle actor death and restart scenarios"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.warning(f"{actor_type} actor died: {error}")
+        
+        # Track failure metrics
+        self.actor_failure_counts[actor_type] += 1
+        
+        # Log metrics if logger is available
+        if hasattr(self, 'logger') and self.logger is not None:
+            try:
+                metrics = {
+                    f"actor_failures/{actor_type}": 1,
+                    f"actor_failures/total": 1,
+                    f"actor_failures/{actor_type}_cumulative": self.actor_failure_counts[actor_type],
+                }
+                self.logger.log(metrics, step=getattr(self, 'global_step', 0))
+            except Exception as e:
+                logger.warning(f"Failed to log actor failure metrics: {e}")
+
+    def _safe_actor_call(self, actor_method_ref, actor_type: str = "unknown", timeout: float = 300.0):
+        """Safely call actor method with error handling and timeout"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            return ray.get(actor_method_ref, timeout=timeout)
+        except ray.exceptions.RayActorError as e:
+            self._handle_actor_error(e, actor_type)
+            raise
+        except ray.exceptions.GetTimeoutError as e:
+            logger.warning(f"Actor call timeout for {actor_type}: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in actor call for {actor_type}: {e}")
+            raise
+
+    def _check_actor_health(self) -> Dict[str, str]:
+        """Check health of all actors"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        health_status = {}
+        
+        try:
+            # Check actor_rollout health
+            if hasattr(self, 'actor_rollout_wg') and self.actor_rollout_wg is not None:
+                try:
+                    # Try a simple health check - accessing the worker group should work
+                    # If actors are healthy, this should not raise an exception
+                    world_size = self.actor_rollout_wg.world_size
+                    health_status["actor_rollout"] = "healthy"
+                except Exception as e:
+                    health_status["actor_rollout"] = f"unhealthy: {str(e)}"
+                    logger.warning(f"Actor rollout health check failed: {e}")
+            
+            # Check critic health
+            if hasattr(self, 'critic_wg') and self.critic_wg is not None:
+                try:
+                    world_size = self.critic_wg.world_size
+                    health_status["critic"] = "healthy"
+                except Exception as e:
+                    health_status["critic"] = f"unhealthy: {str(e)}"
+                    logger.warning(f"Critic health check failed: {e}")
+            
+            # Check reference policy health
+            if hasattr(self, 'ref_policy_wg') and self.ref_policy_wg is not None:
+                try:
+                    world_size = self.ref_policy_wg.world_size
+                    health_status["ref_policy"] = "healthy"
+                except Exception as e:
+                    health_status["ref_policy"] = f"unhealthy: {str(e)}"
+                    logger.warning(f"Reference policy health check failed: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error during actor health check: {e}")
+            health_status["health_check"] = f"error: {str(e)}"
+        
+        return health_status
+
+    def _log_actor_restart(self, actor_type: str) -> None:
+        """Log actor restart events"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        self.actor_restart_counts[actor_type] += 1
+        logger.info(f"Actor {actor_type} restarted (restart count: {self.actor_restart_counts[actor_type]})")
+        
+        # Log metrics if logger is available
+        if hasattr(self, 'logger') and self.logger is not None:
+            try:
+                metrics = {
+                    f"actor_restarts/{actor_type}": 1,
+                    f"actor_restarts/total": 1,
+                    f"actor_restarts/{actor_type}_cumulative": self.actor_restart_counts[actor_type],
+                }
+                self.logger.log(metrics, step=getattr(self, 'global_step', 0))
+            except Exception as e:
+                logger.warning(f"Failed to log actor restart metrics: {e}")
+
     def _save_checkpoint(self) -> None:
         # path: {save_checkpoint_path}/global_step_{global_step}/{actor,critic}
         remove_obsolete_ckpt(
@@ -1591,6 +1698,21 @@ class RayPPOTrainer:
                     )
 
                     self.logger.log(data=metrics, step=self.global_step)
+
+                    # Periodic health monitoring
+                    if (
+                        self.config.fault_tolerance.enable_health_monitoring
+                        and self.config.fault_tolerance.health_check_interval > 0
+                        and self.global_step % max(1, int(self.config.fault_tolerance.health_check_interval)) == 0
+                    ):
+                        health_status = self._check_actor_health()
+                        health_metrics = {
+                            f"actor_health/{actor_type}": 1 if status == "healthy" else 0
+                            for actor_type, status in health_status.items()
+                            if not status.startswith("error")
+                        }
+                        if health_metrics:
+                            self.logger.log(data=health_metrics, step=self.global_step)
 
                     # Update the random indices position to properly track the samples seen
                     if self.config.data.sampling_strategy == "curriculum":

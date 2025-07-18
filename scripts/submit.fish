@@ -9,8 +9,8 @@ JOB_NAME=mmr1_shuffle_mixv7_15k_ep10_0713 \
     trainer.total_episodes=10 \
     worker.rollout.n=32 \
     trainer.nnodes=8 \
-    trainer.val_freq=8 \
-    trainer.save_checkpoint_path=/mnt/amlfs-02/shared/ckpts/mmn/saves/{$JOB_NAME}
+    trainer.val_freq=4 \
+    trainer.save_checkpoint_path=/mnt/amlfs-02/shared/checkpoints/mmn/saves/{$JOB_NAME}
 
 # mmr1_shuffle_mixv5_15k_ep10
 JOB_NAME=mmr1_shuffle_mixv5_15k_ep10_0713 \
@@ -23,8 +23,8 @@ JOB_NAME=mmr1_shuffle_mixv5_15k_ep10_0713 \
     trainer.total_episodes=10 \
     worker.rollout.n=32 \
     trainer.nnodes=8 \
-    trainer.val_freq=8 \
-    trainer.save_checkpoint_path=/mnt/amlfs-02/shared/ckpts/mmn/saves/{$JOB_NAME}
+    trainer.val_freq=4 \
+    trainer.save_checkpoint_path=/mnt/amlfs-02/shared/checkpoints/mmn/saves/{$JOB_NAME}
 
 # mmr1_learn08_bleu02_mixv7_15k_ep10
 JOB_NAME=mmr1_learn08_bleu02_mixv7_15k_ep10_0713 \
@@ -39,8 +39,8 @@ JOB_NAME=mmr1_learn08_bleu02_mixv7_15k_ep10_0713 \
     trainer.total_episodes=10 \
     worker.rollout.n=32 \
     trainer.nnodes=8 \
-    trainer.val_freq=8 \
-    trainer.save_checkpoint_path=/mnt/amlfs-02/shared/ckpts/mmn/saves/{$JOB_NAME}
+    trainer.val_freq=4 \
+    trainer.save_checkpoint_path=/mnt/amlfs-02/shared/checkpoints/mmn/saves/{$JOB_NAME}
 
 # mmr1_learn08_bleu02_mixv5_15k_ep10
 JOB_NAME=mmr1_learn08_bleu02_mixv5_15k_ep10_0713 \
@@ -55,5 +55,5 @@ JOB_NAME=mmr1_learn08_bleu02_mixv5_15k_ep10_0713 \
     trainer.total_episodes=10 \
     worker.rollout.n=32 \
     trainer.nnodes=8 \
-    trainer.val_freq=8 \
-    trainer.save_checkpoint_path=/mnt/amlfs-02/shared/ckpts/mmn/saves/{$JOB_NAME}
+    trainer.val_freq=4 \
+    trainer.save_checkpoint_path=/mnt/amlfs-02/shared/checkpoints/mmn/saves/{$JOB_NAME}

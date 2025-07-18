@@ -121,7 +121,7 @@ class RayResourcePool(ResourcePool):
             placement_group(
                 bundles=bundles,
                 strategy=strategy,
-                name=pg_name_prefix + str(idx),
+                # name=pg_name_prefix + str(idx),
                 lifetime=lifetime,
             )
             for idx, bundles in enumerate(pg_scheme)

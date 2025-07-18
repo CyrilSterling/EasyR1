@@ -30,10 +30,11 @@ from ..workers.fsdp_workers import FSDPWorker
 from ..workers.reward import CustomRewardManager
 from .config import PPOConfig
 from .ray_trainer import RayPPOTrainer, ResourcePoolManager, Role
+import uuid
 
 
 # please make sure main_task is not scheduled on head
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=1, max_restarts=3, max_task_retries=3)
 class Runner:
     """A runner for RL training."""
 
@@ -56,11 +57,30 @@ class Runner:
 
         # define worker classes
         ray_worker_group_cls = RayWorkerGroup
-        role_worker_mapping = {
-            Role.ActorRollout: ray.remote(FSDPWorker),
-            Role.Critic: ray.remote(FSDPWorker),
-            Role.RefPolicy: ray.remote(FSDPWorker),
-        }
+        
+        # Configure fault tolerance based on config
+        if config.fault_tolerance.enable_fault_tolerance:
+            role_worker_mapping = {
+                Role.ActorRollout: ray.remote(
+                    max_restarts=config.fault_tolerance.max_restarts,
+                    max_task_retries=config.fault_tolerance.max_task_retries,
+                )(FSDPWorker),
+                Role.Critic: ray.remote(
+                    max_restarts=config.fault_tolerance.max_restarts,
+                    max_task_retries=config.fault_tolerance.max_task_retries,
+                )(FSDPWorker),
+                Role.RefPolicy: ray.remote(
+                    max_restarts=config.fault_tolerance.max_restarts,
+                    max_task_retries=config.fault_tolerance.max_task_retries,
+                )(FSDPWorker),
+            }
+        else:
+            # Original behavior without fault tolerance
+            role_worker_mapping = {
+                Role.ActorRollout: ray.remote(FSDPWorker),
+                Role.Critic: ray.remote(FSDPWorker),
+                Role.RefPolicy: ray.remote(FSDPWorker),
+            }
         global_pool_id = "global_pool"
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,

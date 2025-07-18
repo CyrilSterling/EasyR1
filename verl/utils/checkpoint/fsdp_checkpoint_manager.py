@@ -28,6 +28,13 @@ from transformers import PreTrainedModel, PreTrainedTokenizer, ProcessorMixin
 
 from .checkpoint_manager import BaseCheckpointManager
 
+def load_anyway(path: str):
+    for weights_only in [True, False]:
+        try:
+            return torch.load(path, weights_only=weights_only)
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+    raise ValueError(f"Failed to load checkpoint from {path}")
 
 class FSDPCheckpointManager(BaseCheckpointManager):
     """
@@ -70,9 +77,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         print(
             f"[rank-{self.rank}]: Loading from {model_path} and {optim_path} and {extra_state_path}."
         )
-        model_state_dict = torch.load(model_path, weights_only=False)
-        optimizer_state_dict = torch.load(optim_path, weights_only=False)
-        extra_state_dict = torch.load(extra_state_path, weights_only=False)
+        model_state_dict = load_anyway(model_path)
+        optimizer_state_dict = load_anyway(optim_path)
+        extra_state_dict = load_anyway(extra_state_path)
         lr_scheduler_state_dict = extra_state_dict["lr_scheduler"]
 
         state_dict_config = ShardedStateDictConfig(offload_to_cpu=True)

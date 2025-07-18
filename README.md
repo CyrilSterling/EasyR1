@@ -27,6 +27,7 @@ EasyR1 is efficient and scalable due to the design of **[HybirdEngine](https://a
   - Padding-free training
   - Resuming from checkpoint
   - Wandb & SwanLab & Mlflow & Tensorboard tracking
+  - Ray actor fault tolerance for production deployments
 
 ## Requirements
 

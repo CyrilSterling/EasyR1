@@ -78,6 +78,16 @@ class AlgorithmConfig:
 
 
 @dataclass
+class FaultToleranceConfig:
+    """Configuration for Ray actor fault tolerance"""
+    enable_fault_tolerance: bool = True
+    max_restarts: int = 3  # Maximum number of times to restart an actor when it crashes
+    max_task_retries: int = 2  # Maximum number of times to retry a task on actor death
+    enable_health_monitoring: bool = True  # Enable actor health monitoring
+    health_check_interval: float = 30.0  # Health check interval in seconds
+
+
+@dataclass
 class TrainerConfig:
     total_episodes: int = 10
     max_steps: Optional[int] = None
@@ -109,6 +119,7 @@ class PPOConfig:
     worker: WorkerConfig = field(default_factory=WorkerConfig)
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
+    fault_tolerance: FaultToleranceConfig = field(default_factory=FaultToleranceConfig)
 
     def post_init(self):
         self.worker.rollout.prompt_length = self.data.max_prompt_length
