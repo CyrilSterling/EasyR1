@@ -10,6 +10,8 @@ from typing import List, Optional
 import logging
 
 from mathruler.grader import extract_boxed_content
+import os.path as osp
+import os
 
 from .gpt_as_judge import get_compare_messages, openai_llm
 from .r1v import r1v_accuracy_only_reward, r1v_accuracy_reward
@@ -312,9 +314,12 @@ def accuracy_reward_batch_vllm(
 
     workflow_id = kwargs.get("workflow_id", None)
     # use judge_ip:port
-    if workflow_id is not None and "judge_ip" in base_urls[0]:
+    if "judge_ip" in base_urls[0]:
+        assert workflow_id is not None, "workflow_id is required when using judge_ip"
+        ip_cache_path = f"/mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/judge_ips/{workflow_id}"
+        assert osp.exists(ip_cache_path), f"judge_ip file {workflow_id} does not exist"
         judge_ip = (
-            open(f"/mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/judge_ips/{workflow_id}")
+            open(ip_cache_path)
             .read()
             .strip()
         )

@@ -29,12 +29,13 @@ from transformers import PreTrainedModel, PreTrainedTokenizer, ProcessorMixin
 from .checkpoint_manager import BaseCheckpointManager
 
 def load_anyway(path: str):
-    for weights_only in [True, False]:
-        try:
-            return torch.load(path, weights_only=weights_only)
-        except Exception as e:
-            print(f"Error loading checkpoint: {e}")
-    raise ValueError(f"Failed to load checkpoint from {path}")
+    # for weights_only in [True, False]:
+    #     try:
+    #         return torch.load(path, weights_only=weights_only)
+    #     except Exception as e:
+    #         print(f"Error loading checkpoint: {e}")
+    # raise ValueError(f"Failed to load checkpoint from {path}")
+    return torch.load(path, weights_only=False)
 
 class FSDPCheckpointManager(BaseCheckpointManager):
     """

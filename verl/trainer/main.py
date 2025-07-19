@@ -156,6 +156,7 @@ def main():
 
     ppo_config = OmegaConf.merge(default_config, cli_args)
     ppo_config = OmegaConf.to_object(ppo_config)
+    print(ppo_config)
 
     if not ray.is_initialized():
         # this is for local ray cluster
