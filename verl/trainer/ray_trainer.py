@@ -67,6 +67,7 @@ from .metrics import (
     compute_timing_metrics,
     reduce_metrics,
 )
+from ..workers.reward import CustomRewardManager
 
 
 # Allow very large images
@@ -116,7 +117,7 @@ class ResourcePoolManager:
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
             # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
             # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
-            # For Megatron backend, we recommend using max_colocate_count>1 that can utilize different WorkerGroup for differnt models
+            # For Megatron backend, we recommend using max_colocate_count>1 that can utilize different WorkerGroup for different models
             resource_pool = RayResourcePool(
                 process_on_nodes=process_on_nodes,
                 use_gpu=True,
@@ -245,7 +246,7 @@ def compute_advantage(
 
 
 @contextmanager
-def _timer(name: str, timing_raw: Dict[str, float]):
+def _timer(name: str, timing_raw: dict[str, float]):
     with Timer(name=name, logger=None) as timer:
         yield
 
@@ -456,27 +457,33 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
     def state_dict(self):
         """Return the state dictionary for checkpointing."""
         return {
-            'consumed_batches': self.consumed_batches,
-            'random_indices_pool': self.random_indices_pool,
-            'random_indices_position': self.random_indices_position,
-            'weights': self.weights.clone() if torch.is_tensor(self.weights) else self.weights,
-            'generator_state': self.generator.get_state() if self.generator is not None else None,
+            "consumed_batches": self.consumed_batches,
+            "random_indices_pool": self.random_indices_pool,
+            "random_indices_position": self.random_indices_position,
+            "weights": (
+                self.weights.clone() if torch.is_tensor(self.weights) else self.weights
+            ),
+            "generator_state": (
+                self.generator.get_state() if self.generator is not None else None
+            ),
         }
 
     def load_state_dict(self, state_dict):
         """Load state from a state dictionary."""
-        self.consumed_batches = state_dict.get('consumed_batches', 0)
-        self.random_indices_pool = state_dict.get('random_indices_pool', list(range(len(self.dataset))))
-        self.random_indices_position = state_dict.get('random_indices_position', 0)
-        self.weights = state_dict.get('weights', self.weights)
-        
+        self.consumed_batches = state_dict.get("consumed_batches", 0)
+        self.random_indices_pool = state_dict.get(
+            "random_indices_pool", list(range(len(self.dataset)))
+        )
+        self.random_indices_position = state_dict.get("random_indices_position", 0)
+        self.weights = state_dict.get("weights", self.weights)
+
         # Restore generator state if available
-        if state_dict.get('generator_state') is not None and self.generator is not None:
+        if state_dict.get("generator_state") is not None and self.generator is not None:
             try:
-                self.generator.set_state(state_dict['generator_state'])
+                self.generator.set_state(state_dict["generator_state"])
             except Exception as e:
                 print(f"Warning: Could not restore generator state: {e}")
-        
+
         # Update the weighted sampler with restored weights
         self.weighted_sampler = WeightedRandomSampler(
             weights=self.weights,
@@ -484,12 +491,19 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
             replacement=self.replacement,
             generator=self.generator,
         )
-        
+
         # Reset cached indices to force regeneration with restored state
         self.cached_mixed_indices = None
-        
-        print(f"Restored curriculum sampler state: consumed_batches={self.consumed_batches}, "
-              f"random_indices_position={self.random_indices_position}")
+
+        print(
+            f"Restored curriculum sampler state: consumed_batches={self.consumed_batches}, "
+            f"random_indices_position={self.random_indices_position}"
+        )
+
+
+def pad_list(lst: list, divisor: int):
+    """Pad a list to the nearest multiple of divisor."""
+    return lst + [lst[-1]] * ((divisor - len(lst)) % divisor)
 
 
 class PaddedSequentialSampler(torch.utils.data.BatchSampler):
@@ -511,8 +525,86 @@ class PaddedSequentialSampler(torch.utils.data.BatchSampler):
     def __len__(self):
         return len(self.indices)
 
+def calculate_distinct_n(tokenized_sequences, n):
+    """Calculate distinct-n metric using model's tokenized sequences."""
+    all_ngrams = []
+    for seq in tokenized_sequences:
+        all_ngrams.extend(list(zip(*[seq[i:] for i in range(n)])))
 
-@ray.remote(max_retries=3)
+    if not all_ngrams:
+        return 0.0
+
+    unique_ngrams = set(all_ngrams)
+    return len(unique_ngrams) / len(all_ngrams)
+
+
+def calculate_self_bleu_n(tokenized_sequences, n):
+    """Calculate self-BLEU score for specific n-gram using model's tokenized sequences."""
+    if len(tokenized_sequences) < 2:
+        return 0.0
+
+    weights = tuple([1.0] if n == 1 else [0.0] * (n - 1) + [1.0])  # Only use n-gram
+    scores = []
+
+    for i, hyp in enumerate(tokenized_sequences):
+        refs = tokenized_sequences[:i] + tokenized_sequences[i + 1 :]
+        score = sentence_bleu(
+            refs, hyp, weights=weights, smoothing_function=SmoothingFunction().method1
+        )
+        scores.append(score)
+
+    return np.mean(scores)
+
+
+def calculate_self_bleu_123(tokenized_sequences):
+    """Calculate self-BLEU-123 score with uniform weights using model's tokenized sequences."""
+    if len(tokenized_sequences) < 2:
+        return 0.0
+
+    weights = (1 / 3, 1 / 3, 1 / 3)  # Uniform weights for 1,2,3-grams
+    scores = []
+
+    for i, hyp in enumerate(tokenized_sequences):
+        refs = tokenized_sequences[:i] + tokenized_sequences[i + 1 :]
+        score = sentence_bleu(
+            refs, hyp, weights=weights, smoothing_function=SmoothingFunction().method1
+        )
+        scores.append(score)
+
+    return np.mean(scores)
+
+
+def calculate_pairwise_edit_distance(tokenized_sequences):
+    """Calculate average pairwise edit distance between all tokenized sequences."""
+    if len(tokenized_sequences) < 2:
+        return 0.0
+
+    distances = []
+    for i in range(len(tokenized_sequences)):
+        for j in range(i + 1, len(tokenized_sequences)):
+            dist = distance(tokenized_sequences[i], tokenized_sequences[j])
+            distances.append(dist)
+
+    return np.mean(distances) if distances else 0.0
+
+
+# Helper function for multiprocessing BLEU score calculation
+def calculate_batch_self_bleu_123_helper(batch_idx, tokens, n_per_item):
+    """Calculate self-BLEU-123 score for a batch segment."""
+    start_idx = batch_idx * n_per_item
+    end_idx = (batch_idx + 1) * n_per_item
+    item_tokens = tokens[start_idx:end_idx]
+    return calculate_self_bleu_123(item_tokens)
+
+
+def calculate_pairwise_edit_distance_helper(batch_idx, tokens, n_per_item):
+    """Calculate average pairwise edit distance between all tokenized sequences."""
+    start_idx = batch_idx * n_per_item
+    end_idx = (batch_idx + 1) * n_per_item
+    item_tokens = tokens[start_idx:end_idx]
+    return calculate_pairwise_edit_distance(item_tokens)
+
+
 def calculate_learnability_metric(reward_fn, batch, batch_size, curriculum_rollout_n):
     """Remote task for calculating learnability metric."""
     reward_tensor, reward_metrics = reward_fn(batch)
@@ -522,9 +614,54 @@ def calculate_learnability_metric(reward_fn, batch, batch_size, curriculum_rollo
     ).view(batch_size, curriculum_rollout_n, -1)
 
     # Calculate pass rate and learnability
-    pass_rate = acc_reward_tensor.mean(dim=-1).mean(dim=-1)  # sequence-level average over rollouts
+    pass_rate = acc_reward_tensor.mean(dim=-1).mean(
+        dim=-1
+    )  # sequence-level average over rollouts
     learnability = pass_rate * (1 - pass_rate)
     return learnability
+
+
+@ray.remote(max_retries=3)
+def calculate_learnability_metric_with_dataset_and_indices(
+    reward_fn: CustomRewardManager,
+    gen_batch_output: DataProto,
+    dataset: RLHFDataset,
+    indices: List[int],
+    batch_size: int,
+    curriculum_rollout_n: int,
+):
+    """Remote task for calculating learnability metric with dataset and indices."""
+    batch = collate_fn([dataset[i] for i in indices])
+    batch_size = len(indices)
+
+    batch = DataProto.from_single_dict(batch)
+
+    if "multi_modal_inputs" in batch.non_tensor_batch.keys():
+        _ = batch.pop(
+            batch_keys=["input_ids", "attention_mask", "position_ids"],
+            non_tensor_batch_keys=[
+                "raw_prompt_ids",
+                "multi_modal_data",
+                "multi_modal_inputs",
+            ],
+        )
+    else:
+        _ = batch.pop(
+            batch_keys=["input_ids", "attention_mask", "position_ids"],
+            non_tensor_batch_keys=["raw_prompt_ids"],
+        )
+
+    batch = batch.repeat(
+        repeat_times=curriculum_rollout_n, interleave=True
+    )
+    batch = batch.union(gen_batch_output)
+
+    return calculate_learnability_metric(
+        reward_fn=reward_fn,
+        batch=batch,
+        batch_size=batch_size,
+        curriculum_rollout_n=curriculum_rollout_n,
+    )
 
 
 @ray.remote(max_retries=3)
@@ -548,7 +685,7 @@ def calculate_distinct_n_metric(responses, batch_size, curriculum_rollout_n, n=3
 def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
     """Remote task for calculating self-BLEU-123 metric."""
     tokenized_sequences = responses.tolist()
-    
+
     # Create a partial function with fixed arguments
     worker_fn = partial(
         calculate_batch_self_bleu_123_helper,
@@ -559,7 +696,7 @@ def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
     # Use multiprocessing to compute BLEU scores in parallel
     with multiprocessing.Pool(processes=32) as pool:
         bleu_score = pool.map(worker_fn, range(batch_size))
-    
+
     return torch.tensor(bleu_score, dtype=torch.float32)
 
 
@@ -567,20 +704,22 @@ def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
 def calculate_edit_distance_metric(responses, batch_size, curriculum_rollout_n):
     """Remote task for calculating edit distance metric."""
     tokenized_sequences = responses.tolist()
-    
+
     worker_fn = partial(
         calculate_pairwise_edit_distance_helper,
         tokens=tokenized_sequences,
         n_per_item=curriculum_rollout_n,
     )
-    
+
     with multiprocessing.Pool(processes=32) as pool:
         edit_score = pool.map(worker_fn, range(batch_size))
-    
+
     return torch.tensor(edit_score, dtype=torch.float32)
 
 
-def combine_metric_results(results, weights, metrics):
+def combine_metric_results(
+    results: list[torch.Tensor], weights: list[float], metrics: list[str]
+) -> torch.Tensor:
     """Combine metric results with their weights."""
     weighted_sum = None
     for i, (result, metric) in enumerate(zip(results, metrics)):
@@ -662,15 +801,25 @@ class RayPPOTrainer:
                 "Rollout batch size must be divisible by global batch size."
             )
 
-        # Track resuming state for proper curriculum handling
-        self.is_resuming_from_checkpoint = False
-        self.curriculum_state_to_restore = None
+        self.checkpoint_path = self.config.load_checkpoint_path = (
+            self._get_checkpoint_path()
+        )
 
         # Initialize workers first
         self.init_workers()
 
+        
+        self.global_step = 0
+        # Load checkpoint for workers and dataloader
+        self._load_worker_state()
+
         # Then create dataloader which depends on workers
         self._create_dataloader()
+
+        # Curriculum related variables
+        self.logger = Tracker(
+            loggers=self.config.trainer.logger, config=self.config.to_dict()
+        )
 
     def _create_dataloader(self) -> None:
         self.train_dataset = RLHFDataset(
@@ -687,41 +836,39 @@ class RayPPOTrainer:
             max_pixels=self.config.data.max_pixels,
         )
 
-        # breakpoint()
-        # Initialize sampler based on configured strategy
         if self.config.data.sampling_strategy == "curriculum":
-            # Handle resuming from checkpoint
-            if self.is_resuming_from_checkpoint and self.curriculum_state_to_restore is not None:
-                # Restore curriculum weights from checkpoint
-                if 'curriculum_weights' in self.curriculum_state_to_restore:
-                    self.curriculum_weights = self.curriculum_state_to_restore['curriculum_weights']
-                    # Store weights in dataset for access during training
-                    self.train_dataset.curriculum_weights = self.curriculum_weights
-                    print("Restored curriculum weights from checkpoint")
-                else:
-                    print("Warning: curriculum_weights not found in checkpoint, initializing from scratch")
-                    self._init_curriculum_weights()
-            else:
-                # Initialize curriculum learning weights from scratch
-                self._init_curriculum_weights()
+            curriculum_state = self._load_curriculum_state()
 
-            # Create mixed curriculum sampler
-            self.curriculum_sampler = MixedCurriculumSampler(
+            # Load or compute curriculum weights
+            # print(f"DEBUG: always compute curriculum weights")
+            if curriculum_state is not None:
+                self.curriculum_weights = curriculum_state["curriculum_weights"]
+                self.train_dataset.curriculum_weights = self.curriculum_weights
+                print(
+                    f"Loaded curriculum weights to self.curriculum_weights"
+                )
+            else:
+                print("No curriculum state found, will compute curriculum weights")
+                self._update_curriculum_weights()
+
+            assert self.train_dataset.curriculum_weights is not None, "curriculum_weights should be initialized"
+
+            # Initialize curriculum sampler
+            sampler = self.curriculum_sampler = MixedCurriculumSampler(
                 dataset=self.train_dataset,
-                weights=self.curriculum_weights,
+                weights=self.train_dataset.curriculum_weights,
                 batch_size=self.config.data.rollout_batch_size,
                 mixture_ratio=self.config.data.curriculum_mixture_ratio,
                 replacement=True,  # Always use replacement for weighted sampling
                 generator=torch.Generator().manual_seed(self.config.data.seed),
             )
-            
-            # Restore sampler state if resuming from checkpoint
-            if self.is_resuming_from_checkpoint and self.curriculum_state_to_restore is not None:
-                if 'sampler_state' in self.curriculum_state_to_restore:
-                    self.curriculum_sampler.load_state_dict(self.curriculum_state_to_restore['sampler_state'])
-                    print("Restored curriculum sampler state from checkpoint")
-            
-            sampler = self.curriculum_sampler
+
+            # Load curriculum sampler state if available
+            if curriculum_state is not None:
+                self.curriculum_sampler.load_state_dict(
+                    curriculum_state["sampler_state"]
+                )
+
         elif self.config.data.sampling_strategy == "shuffle":
             train_dataloader_generator = torch.Generator()
             train_dataloader_generator.manual_seed(self.config.data.seed)
@@ -785,20 +932,20 @@ class RayPPOTrainer:
         self.config.worker.critic.optim.training_steps = training_steps
         print(f"Total training steps: {self.training_steps}")
 
-        # Clean up resuming state after dataloader creation
-        if self.is_resuming_from_checkpoint:
-            self.is_resuming_from_checkpoint = False
-            self.curriculum_state_to_restore = None
-            print("Completed checkpoint resuming process")
-
-    def _calculate_curriculum_metric(self, batch: DataProto) -> Dict:
+    def _calculate_curriculum_metric(
+        self, dataset: RLHFDataset, indices: List[int]
+    ) -> list[ray.ObjectRef]:
         """Calculate the curriculum metric based on the configured strategy.
-        
+
         Returns:
             A dictionary containing futures for the remote metric calculations
             and metadata needed to combine them later.
         """
-        batch_size = len(batch.batch)
+
+        # --- Prepare gen batch ---
+        batch = collate_fn([dataset[i] for i in indices])
+        batch = DataProto.from_single_dict(batch)
+        batch_size = len(indices)
 
         # Generate responses for the batch - this has to be done sequentially
         if "multi_modal_inputs" in batch.non_tensor_batch.keys():
@@ -816,67 +963,51 @@ class RayPPOTrainer:
                 non_tensor_batch_keys=["raw_prompt_ids"],
             )
 
+        # --- Generate responses ---
         gen_batch.meta_info["n"] = self.config.data.curriculum_rollout_n
-        gen_batch.meta_info["disable_sleep"] = True
         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-        gen_batch.meta_info.pop("disable_sleep")
         gen_batch.meta_info.pop("n")
 
-        batch = batch.repeat(
-            repeat_times=self.config.data.curriculum_rollout_n, interleave=True
-        )
-        batch = batch.union(gen_batch_output)
-
-        # Launch parallel metric computation based on configured metrics
+        # --- Submit future for remote metric calculations ---
         metric_futures = []
-        
+
         for metric_name in self.config.data.curriculum_metrics:
             if metric_name == "learnability":
-                metric_futures.append(
-                    calculate_learnability_metric.remote(
-                        self.reward_fn, 
-                        batch, 
-                        batch_size, 
-                        self.config.data.curriculum_rollout_n
-                    )
+                future = calculate_learnability_metric_with_dataset_and_indices.remote(
+                    reward_fn=self.reward_fn,
+                    dataset=dataset,
+                    gen_batch_output=gen_batch_output,
+                    indices=indices,
+                    batch_size=batch_size,
+                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
                 )
             elif metric_name == "distinct_3":
-                metric_futures.append(
-                    calculate_distinct_n_metric.remote(
-                        gen_batch_output.batch["responses"],
-                        batch_size,
-                        self.config.data.curriculum_rollout_n,
-                        n=3
-                    )
+                future = calculate_distinct_n_metric.remote(
+                    responses=gen_batch_output.batch["responses"],
+                    batch_size=batch_size,
+                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
+                    n=3,
                 )
             elif metric_name == "self_bleu_123":
-                metric_futures.append(
-                    calculate_self_bleu_metric.remote(
-                        gen_batch_output.batch["responses"],
-                        batch_size,
-                        self.config.data.curriculum_rollout_n
-                    )
+                future = calculate_self_bleu_metric.remote(
+                    responses=gen_batch_output.batch["responses"],
+                    batch_size=batch_size,
+                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
                 )
             elif metric_name == "edit_distance":
-                metric_futures.append(
-                    calculate_edit_distance_metric.remote(
-                        gen_batch_output.batch["responses"],
-                        batch_size,
-                        self.config.data.curriculum_rollout_n
-                    )
+                future = calculate_edit_distance_metric.remote(
+                    responses=gen_batch_output.batch["responses"],
+                    batch_size=batch_size,
+                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
                 )
             else:
-                raise ValueError(
-                    f"Unknown curriculum metric: {metric_name}"
-                )
-        
+                raise ValueError(f"Unknown curriculum metric: {metric_name}")
+
+            metric_futures.append(future)
+
         # Return the futures along with metadata needed to combine them later
-        return {
-            "futures": metric_futures,
-            "weights": self.config.data.curriculum_metric_weights,
-            "metrics": self.config.data.curriculum_metrics
-        }
-    
+        return metric_futures
+
     def _save_curriculum_weights(self, weights: torch.Tensor, step: int = None) -> None:
         """Save curriculum weights to a file."""
         # Create directory if it doesn't exist
@@ -897,90 +1028,75 @@ class RayPPOTrainer:
 
     def _compute_curriculum_weights(self) -> torch.Tensor:
         """Compute curriculum weights for each sample in the dataset by sequentially generating sequences
-        but calculating metrics in parallel, without waiting for each batch's metrics to complete."""
-        curriculum_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.curriculum_rollout_batch_size,
-            sampler=PaddedSequentialSampler(
-                self.train_dataset,
-                batch_size=self.config.data.curriculum_rollout_batch_size,
-            ),
-            shuffle=False,
-            num_workers=32,
-            pin_memory=True,
-            collate_fn=collate_fn,
-            drop_last=False,
-        )
+        but calculating metrics in parallel, without waiting for each batch's metrics to complete.
+        """
 
-        # Initialize weights tensor
-        curriculum_weights = torch.zeros(
-            len(curriculum_dataloader) * self.config.data.curriculum_rollout_batch_size,
-            dtype=torch.float32,
-        )
-        
+        curriculum_weights = torch.zeros(len(self.train_dataset), dtype=torch.float32)
+
         # Process batches sequentially but don't wait for metric calculations
-        pending_results = []  # Store (batch_idx, futures_dict) tuples
-        
+        metric_futures_with_batch_idx = []  # Store (batch_idx, futures_dict) tuples
+
         # Generate sequences for all batches first, queueing metric calculations
         print("Generating sequences and launching metric calculations...")
-        for batch_idx, batch_dict in enumerate(curriculum_dataloader):
-            batch = DataProto.from_single_dict(batch_dict)
-            
+        indices = list(range(len(self.train_dataset)))
+        indices_padded = pad_list(
+            indices, divisor=self.config.data.curriculum_rollout_batch_size
+        )
+
+        index_batches = [
+            indices_padded[i : i + self.config.data.curriculum_rollout_batch_size]
+            for i in range(
+                0, len(indices_padded), self.config.data.curriculum_rollout_batch_size
+            )
+        ]
+
+        for batch_idx, index_batch in enumerate(index_batches):
             # Calculate metrics, get back futures dict
-            result_dict = self._calculate_curriculum_metric(batch)
-            
+            metric_futures_cur_batch = self._calculate_curriculum_metric(
+                dataset=self.train_dataset, indices=index_batch
+            )
+
             # Store batch index and futures for later collection
-            pending_results.append((batch_idx, result_dict))
-            
-            # Log progress
-            print(f"Processed {batch_idx + 1}/{len(curriculum_dataloader)} batches for sequence generation")
-                
+            metric_futures_with_batch_idx.append((batch_idx, metric_futures_cur_batch))
+
+            print(
+                f"Launched {len(metric_futures_cur_batch)} metric calculations for batch {batch_idx}"
+            )
+
         # Now process all the pending futures
-        print(f"Processing {len(pending_results)} pending metric calculations...")
-        for batch_idx, result_dict in pending_results:
-            futures = result_dict["futures"]
-            weights = result_dict["weights"]
-            metrics = result_dict["metrics"]
-            
+        for batch_idx, futures in metric_futures_with_batch_idx:
             # Collect results from futures
-            metric_results = [ray.get(future) for future in futures]
-            
+            metric_results = ray.get(futures)
+
             # Combine the metric results for this batch
-            combined_metric = combine_metric_results(metric_results, weights, metrics)
-            
+            combined_metric = combine_metric_results(
+                metric_results,
+                weights=self.config.data.curriculum_metric_weights,
+                metrics=self.config.data.curriculum_metrics,
+            )
+
             # Store the combined metric
             start_idx = batch_idx * self.config.data.curriculum_rollout_batch_size
-            end_idx = start_idx + self.config.data.curriculum_rollout_batch_size
-            curriculum_weights[start_idx:end_idx] = combined_metric.detach()
-            
+            end_idx = min(start_idx + self.config.data.curriculum_rollout_batch_size, len(self.train_dataset))
+            curriculum_weights[start_idx:end_idx] = combined_metric.detach()[:end_idx - start_idx]
+
             # Log progress
-            print(f"Processed metrics for {batch_idx + 1}/{len(pending_results)} batches")
+            print(
+                f"Processed metrics for {batch_idx + 1}/{len(metric_futures_with_batch_idx)} batches"
+            )
 
-        # Trim any extra padding indices
-        curriculum_weights = curriculum_weights[: len(self.train_dataset)]
-
-        del curriculum_dataloader
+        print(f"DEBUG: succesful! curriculum weights shape: {curriculum_weights.shape}")
 
         # Normalize weights using min-max scaling
         min_weight = curriculum_weights.min()
         max_weight = curriculum_weights.max()
         curriculum_weights = (curriculum_weights - min_weight) / (
-            max_weight - min_weight + 1e-8  # Add small epsilon to avoid division by zero
+            max_weight
+            - min_weight
+            + 1e-8  # Add small epsilon to avoid division by zero
         )
 
         return curriculum_weights
-    
-    def _init_curriculum_weights(self) -> None:
-        """Initialize curriculum weights."""
-        print("Initializing curriculum weights using parallel computation...")
-        self.curriculum_weights = self._compute_curriculum_weights()
-
-        # Store weights in dataset for access during training
-        self.train_dataset.curriculum_weights = self.curriculum_weights
-
-        # Save initial weights
-        self._save_curriculum_weights(self.curriculum_weights)
-        print("Curriculum weights initialized.")
 
     def _update_curriculum_weights(self) -> None:
         """Update curriculum learning weights based on current model performance."""
@@ -990,28 +1106,22 @@ class RayPPOTrainer:
 
         # Update weights with configured momentum
         momentum = self.config.data.curriculum_momentum
-        self.curriculum_weights = (
-            momentum * self.curriculum_weights + (1 - momentum) * new_weights
-        )
+
+        if self.train_dataset.curriculum_weights is None:
+            self.train_dataset.curriculum_weights = new_weights
+        else:
+            self.train_dataset.curriculum_weights = (
+                momentum * self.train_dataset.curriculum_weights + (1 - momentum) * new_weights
+            )
 
         # Update sampler weights (this preserves sampler state internally)
-        self.curriculum_sampler.update_weights(self.curriculum_weights)
-
-        # Store updated weights in dataset
-        self.train_dataset.curriculum_weights = self.curriculum_weights
+        self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
 
         # Save updated weights
-        self._save_curriculum_weights(self.curriculum_weights, step=self.global_step)
+        self._save_curriculum_weights(self.train_dataset.curriculum_weights, step=self.global_step)
 
-        # Note: We don't need to recreate the dataloader since update_weights() 
-        # only updates the internal weighted sampler while preserving all state.
-        # The existing dataloader will use the updated sampler automatically.
-
-        # Set flag to signal that the dataloader iterator needs to be refreshed
-        self.refresh_dataloader_iterator = True
-        print(
-            f"Curriculum weights updated at step {self.global_step}, dataloader will refresh for next batch"
-        )
+        # Update dataloader iterator for current epoch
+        self.dataloader_iterator = iter(self.train_dataloader)
 
     def _maybe_log_val_generations(
         self, inputs: List[str], outputs: List[str], scores: List[float]
@@ -1031,7 +1141,7 @@ class RayPPOTrainer:
         samples = samples[: self.config.trainer.val_generations_to_log]
         self.logger.log_generation(samples, self.global_step)
 
-    def _validate(self) -> Dict[str, Any]:
+    def _validate(self) -> dict[str, Any]:
         reward_tensor_lst = []
         # Lists to collect samples for the table
         sample_inputs, sample_outputs, sample_scores = [], [], []
@@ -1164,7 +1274,7 @@ class RayPPOTrainer:
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`. Instead, directly pass different resource pool to different worker groups.
         # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
-        all_wg: Dict[str, FSDPWorker] = {}
+        all_wg: dict[str, FSDPWorker] = {}
         self.wg_dicts = []
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
@@ -1173,7 +1283,7 @@ class RayPPOTrainer:
             )
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
-            # keep the referece of WorkerDict to support ray >= 2.31. Ref: https://github.com/ray-project/ray/pull/45699
+            # keep the reference of WorkerDict to support ray >= 2.31. Ref: https://github.com/ray-project/ray/pull/45699
             self.wg_dicts.append(wg_dict)
 
         if self.use_critic:
@@ -1196,33 +1306,41 @@ class RayPPOTrainer:
         self.actor_failure_counts = defaultdict(int)
         self.actor_restart_counts = defaultdict(int)
 
-    def _handle_actor_error(self, error: ray.exceptions.RayActorError, actor_type: str) -> None:
+    def _handle_actor_error(
+        self, error: ray.exceptions.RayActorError, actor_type: str
+    ) -> None:
         """Handle actor death and restart scenarios"""
         import logging
+
         logger = logging.getLogger(__name__)
-        
+
         logger.warning(f"{actor_type} actor died: {error}")
-        
+
         # Track failure metrics
         self.actor_failure_counts[actor_type] += 1
-        
+
         # Log metrics if logger is available
-        if hasattr(self, 'logger') and self.logger is not None:
+        if hasattr(self, "logger") and self.logger is not None:
             try:
                 metrics = {
                     f"actor_failures/{actor_type}": 1,
                     f"actor_failures/total": 1,
-                    f"actor_failures/{actor_type}_cumulative": self.actor_failure_counts[actor_type],
+                    f"actor_failures/{actor_type}_cumulative": self.actor_failure_counts[
+                        actor_type
+                    ],
                 }
-                self.logger.log(metrics, step=getattr(self, 'global_step', 0))
+                self.logger.log(metrics, step=getattr(self, "global_step", 0))
             except Exception as e:
                 logger.warning(f"Failed to log actor failure metrics: {e}")
 
-    def _safe_actor_call(self, actor_method_ref, actor_type: str = "unknown", timeout: float = 300.0):
+    def _safe_actor_call(
+        self, actor_method_ref, actor_type: str = "unknown", timeout: float = 300.0
+    ):
         """Safely call actor method with error handling and timeout"""
         import logging
+
         logger = logging.getLogger(__name__)
-        
+
         try:
             return ray.get(actor_method_ref, timeout=timeout)
         except ray.exceptions.RayActorError as e:
@@ -1235,16 +1353,17 @@ class RayPPOTrainer:
             logger.error(f"Unexpected error in actor call for {actor_type}: {e}")
             raise
 
-    def _check_actor_health(self) -> Dict[str, str]:
+    def _check_actor_health(self) -> dict[str, str]:
         """Check health of all actors"""
         import logging
+
         logger = logging.getLogger(__name__)
-        
+
         health_status = {}
-        
+
         try:
             # Check actor_rollout health
-            if hasattr(self, 'actor_rollout_wg') and self.actor_rollout_wg is not None:
+            if hasattr(self, "actor_rollout_wg") and self.actor_rollout_wg is not None:
                 try:
                     # Try a simple health check - accessing the worker group should work
                     # If actors are healthy, this should not raise an exception
@@ -1253,48 +1372,53 @@ class RayPPOTrainer:
                 except Exception as e:
                     health_status["actor_rollout"] = f"unhealthy: {str(e)}"
                     logger.warning(f"Actor rollout health check failed: {e}")
-            
+
             # Check critic health
-            if hasattr(self, 'critic_wg') and self.critic_wg is not None:
+            if hasattr(self, "critic_wg") and self.critic_wg is not None:
                 try:
                     world_size = self.critic_wg.world_size
                     health_status["critic"] = "healthy"
                 except Exception as e:
                     health_status["critic"] = f"unhealthy: {str(e)}"
                     logger.warning(f"Critic health check failed: {e}")
-            
+
             # Check reference policy health
-            if hasattr(self, 'ref_policy_wg') and self.ref_policy_wg is not None:
+            if hasattr(self, "ref_policy_wg") and self.ref_policy_wg is not None:
                 try:
                     world_size = self.ref_policy_wg.world_size
                     health_status["ref_policy"] = "healthy"
                 except Exception as e:
                     health_status["ref_policy"] = f"unhealthy: {str(e)}"
                     logger.warning(f"Reference policy health check failed: {e}")
-                    
+
         except Exception as e:
             logger.error(f"Error during actor health check: {e}")
             health_status["health_check"] = f"error: {str(e)}"
-        
+
         return health_status
 
     def _log_actor_restart(self, actor_type: str) -> None:
         """Log actor restart events"""
         import logging
+
         logger = logging.getLogger(__name__)
-        
+
         self.actor_restart_counts[actor_type] += 1
-        logger.info(f"Actor {actor_type} restarted (restart count: {self.actor_restart_counts[actor_type]})")
-        
+        logger.info(
+            f"Actor {actor_type} restarted (restart count: {self.actor_restart_counts[actor_type]})"
+        )
+
         # Log metrics if logger is available
-        if hasattr(self, 'logger') and self.logger is not None:
+        if hasattr(self, "logger") and self.logger is not None:
             try:
                 metrics = {
                     f"actor_restarts/{actor_type}": 1,
                     f"actor_restarts/total": 1,
-                    f"actor_restarts/{actor_type}_cumulative": self.actor_restart_counts[actor_type],
+                    f"actor_restarts/{actor_type}_cumulative": self.actor_restart_counts[
+                        actor_type
+                    ],
                 }
-                self.logger.log(metrics, step=getattr(self, 'global_step', 0))
+                self.logger.log(metrics, step=getattr(self, "global_step", 0))
             except Exception as e:
                 logger.warning(f"Failed to log actor restart metrics: {e}")
 
@@ -1320,10 +1444,12 @@ class RayPPOTrainer:
         torch.save(dataloader_state_dict, dataloader_path)
 
         # Save curriculum learning state if using curriculum strategy
-        if self.config.data.sampling_strategy == "curriculum" and hasattr(self, 'curriculum_sampler'):
+        if self.config.data.sampling_strategy == "curriculum" and hasattr(
+            self, "curriculum_sampler"
+        ):
             curriculum_state = {
-                'curriculum_weights': self.curriculum_weights,
-                'sampler_state': self.curriculum_sampler.state_dict(),
+                "curriculum_weights": self.train_dataset.curriculum_weights,
+                "sampler_state": self.curriculum_sampler.state_dict(),
             }
             curriculum_path = os.path.join(folder_path, "curriculum_state.pt")
             torch.save(curriculum_state, curriculum_path)
@@ -1335,68 +1461,51 @@ class RayPPOTrainer:
         with open(last_global_step_path, "w") as f:
             f.write(str(self.global_step))
 
-    def _load_checkpoint(self) -> None:
+    def _get_checkpoint_path(self) -> str:
         if self.config.trainer.load_checkpoint_path is not None:
-            pass
-        elif osp.exists(self.config.trainer.save_checkpoint_path):
-            ckpt_list = [
-                _
-                for _ in os.listdir(self.config.trainer.save_checkpoint_path)
-                if _.startswith("global_step_")
-            ]
-            if len(ckpt_list) == 0:
-                print(
-                    f"No checkpoint found at {self.config.trainer.save_checkpoint_path}, will start from scratch."
-                )
-                return
-            ckpt_list.sort(key=lambda x: int(x.split("global_step_")[-1]))
-            self.config.trainer.load_checkpoint_path = os.path.join(
-                self.config.trainer.save_checkpoint_path, ckpt_list[-1]
-            )
-        else:
+            return None
+        if not os.path.exists(self.config.trainer.save_checkpoint_path):
             print(
                 f"No checkpoint found at {self.config.trainer.save_checkpoint_path}, will start from scratch."
             )
+            return None
+
+        ckpt_list = [
+            _
+            for _ in os.listdir(self.config.trainer.save_checkpoint_path)
+            if _.startswith("global_step_")
+        ]
+        if len(ckpt_list) == 0:
+            print(
+                f"No checkpoint found at {self.config.trainer.save_checkpoint_path}, will start from scratch."
+            )
+            return None
+
+        ckpt_list.sort(key=lambda x: int(x.split("global_step_")[-1]))
+        return os.path.join(self.config.trainer.save_checkpoint_path, ckpt_list[-1])
+
+    def _load_curriculum_state(self) -> bool:
+        """Load curriculum state from checkpoint, set self.curriculum_weights and sampler state
+        Must be called after self.train_dataset, self.curriculum_sampler is initialized
+        """
+        if self.checkpoint_path is None:
+            return None
+
+        curriculum_path = os.path.join(self.checkpoint_path, "curriculum_state.pt")
+        if os.path.exists(curriculum_path):
+            curriculum_state = torch.load(curriculum_path, weights_only=False)
+            return curriculum_state
+        else:
+            print(
+                f"No curriculum state found at {curriculum_path}, will initialize from scratch."
+            )
+            return None
+
+    def _load_dataloader_state(self) -> None:
+        if self.checkpoint_path is None:
             return
 
-        if (
-            "global_step_"
-            not in self.config.trainer.load_checkpoint_path.strip(os.path.sep).split(
-                os.path.sep
-            )[-1]
-        ):
-            raise ValueError("`load_checkpoint_path` should end with `global_step_*`.")
-
-        print(f"Load from checkpoint: {self.config.trainer.load_checkpoint_path}.")
-        self.global_step = int(
-            self.config.trainer.load_checkpoint_path.strip(os.path.sep).split(
-                "global_step_"
-            )[-1]
-        )
-        
-        # Load curriculum state first if using curriculum strategy
-        if self.config.data.sampling_strategy == "curriculum":
-            curriculum_path = os.path.join(
-                self.config.trainer.load_checkpoint_path, "curriculum_state.pt"
-            )
-            if os.path.exists(curriculum_path):
-                self.curriculum_state_to_restore = torch.load(curriculum_path, weights_only=False)
-                self.is_resuming_from_checkpoint = True
-                print(f"Loaded curriculum state from {curriculum_path}")
-            else:
-                print(f"No curriculum state found at {curriculum_path}, will initialize from scratch.")
-        
-        actor_path = os.path.join(self.config.trainer.load_checkpoint_path, "actor")
-        self.actor_rollout_wg.load_checkpoint(actor_path)
-        if self.use_critic:
-            critic_path = os.path.join(
-                self.config.trainer.load_checkpoint_path, "critic"
-            )
-            self.critic_wg.load_checkpoint(critic_path)
-
-        dataloader_path = os.path.join(
-            self.config.trainer.load_checkpoint_path, "dataloader.pt"
-        )
+        dataloader_path = os.path.join(self.checkpoint_path, "dataloader.pt")
         if os.path.exists(dataloader_path):
             dataloader_state_dict = torch.load(dataloader_path, weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
@@ -1405,10 +1514,26 @@ class RayPPOTrainer:
                 f"No dataloader state found at {dataloader_path}, will start from scratch."
             )
 
+    def _load_worker_state(self) -> None:
+        if self.checkpoint_path is None:
+            return
+
+        print(f"Load from checkpoint: {self.checkpoint_path}.")
+        self.global_step = int(
+            self.checkpoint_path.strip(os.path.sep).split("global_step_")[-1]
+        )
+        print(f"Set global_step to {self.global_step}")
+
+        actor_path = os.path.join(self.checkpoint_path, "actor")
+        self.actor_rollout_wg.load_checkpoint(actor_path)
+        if self.use_critic:
+            critic_path = os.path.join(self.checkpoint_path, "critic")
+            self.critic_wg.load_checkpoint(critic_path)
+
     def _balance_batch(
         self,
         batch: DataProto,
-        metrics: Dict[str, Any],
+        metrics: dict[str, Any],
         logging_prefix: str = "global_seqlen",
     ) -> None:
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -1440,22 +1565,7 @@ class RayPPOTrainer:
         The light-weight advantage computation is done on the driver process.
         """
         # breakpoint()
-        self.logger = Tracker(
-            loggers=self.config.trainer.logger, config=self.config.to_dict()
-        )
-        self.global_step = 0
-        val_metrics: Optional[Dict[str, Any]] = None
-
-        # Flag to track when to refresh the dataloader iterator
-        self.refresh_dataloader_iterator = False
-
-        # load checkpoint before doing anything
-        self._load_checkpoint()
-
-        # Recreate dataloader if we loaded curriculum state from checkpoint
-        if self.is_resuming_from_checkpoint and self.config.data.sampling_strategy == "curriculum":
-            print("Recreating dataloader with restored curriculum state...")
-            self._create_dataloader()
+        val_metrics: dict[str, Any] | None= None
 
         # perform validation before training
         if self.val_reward_fn is not None and self.config.trainer.val_before_train:
@@ -1475,19 +1585,12 @@ class RayPPOTrainer:
                 )
 
             # Create a new iterator for each epoch
-            dataloader_iterator = iter(self.train_dataloader)
+            self.dataloader_iterator = iter(self.train_dataloader)
 
             # Loop until we've processed all batches or need to refresh the iterator
             while True:
                 try:
-                    # Get the next batch from the current iterator
-                    if self.refresh_dataloader_iterator:
-                        # If we need to refresh, create a new iterator with updated weights
-                        dataloader_iterator = iter(self.train_dataloader)
-                        self.refresh_dataloader_iterator = False
-                        print("Dataloader iterator refreshed with updated weights")
-
-                    batch_dict = next(dataloader_iterator)
+                    batch_dict = next(self.dataloader_iterator)
 
                     self.global_step += 1
                     if self.global_step > self.training_steps:
@@ -1703,11 +1806,15 @@ class RayPPOTrainer:
                     if (
                         self.config.fault_tolerance.enable_health_monitoring
                         and self.config.fault_tolerance.health_check_interval > 0
-                        and self.global_step % max(1, int(self.config.fault_tolerance.health_check_interval)) == 0
+                        and self.global_step
+                        % max(1, int(self.config.fault_tolerance.health_check_interval))
+                        == 0
                     ):
                         health_status = self._check_actor_health()
                         health_metrics = {
-                            f"actor_health/{actor_type}": 1 if status == "healthy" else 0
+                            f"actor_health/{actor_type}": (
+                                1 if status == "healthy" else 0
+                            )
                             for actor_type, status in health_status.items()
                             if not status.startswith("error")
                         }
@@ -1763,82 +1870,3 @@ class RayPPOTrainer:
         ):
             self._save_checkpoint()
 
-
-def calculate_distinct_n(tokenized_sequences, n):
-    """Calculate distinct-n metric using model's tokenized sequences."""
-    all_ngrams = []
-    for seq in tokenized_sequences:
-        all_ngrams.extend(list(zip(*[seq[i:] for i in range(n)])))
-
-    if not all_ngrams:
-        return 0.0
-
-    unique_ngrams = set(all_ngrams)
-    return len(unique_ngrams) / len(all_ngrams)
-
-
-def calculate_self_bleu_n(tokenized_sequences, n):
-    """Calculate self-BLEU score for specific n-gram using model's tokenized sequences."""
-    if len(tokenized_sequences) < 2:
-        return 0.0
-
-    weights = tuple([1.0] if n == 1 else [0.0] * (n - 1) + [1.0])  # Only use n-gram
-    scores = []
-
-    for i, hyp in enumerate(tokenized_sequences):
-        refs = tokenized_sequences[:i] + tokenized_sequences[i + 1 :]
-        score = sentence_bleu(
-            refs, hyp, weights=weights, smoothing_function=SmoothingFunction().method1
-        )
-        scores.append(score)
-
-    return np.mean(scores)
-
-
-def calculate_self_bleu_123(tokenized_sequences):
-    """Calculate self-BLEU-123 score with uniform weights using model's tokenized sequences."""
-    if len(tokenized_sequences) < 2:
-        return 0.0
-
-    weights = (1 / 3, 1 / 3, 1 / 3)  # Uniform weights for 1,2,3-grams
-    scores = []
-
-    for i, hyp in enumerate(tokenized_sequences):
-        refs = tokenized_sequences[:i] + tokenized_sequences[i + 1 :]
-        score = sentence_bleu(
-            refs, hyp, weights=weights, smoothing_function=SmoothingFunction().method1
-        )
-        scores.append(score)
-
-    return np.mean(scores)
-
-
-def calculate_pairwise_edit_distance(tokenized_sequences):
-    """Calculate average pairwise edit distance between all tokenized sequences."""
-    if len(tokenized_sequences) < 2:
-        return 0.0
-
-    distances = []
-    for i in range(len(tokenized_sequences)):
-        for j in range(i + 1, len(tokenized_sequences)):
-            dist = distance(tokenized_sequences[i], tokenized_sequences[j])
-            distances.append(dist)
-
-    return np.mean(distances) if distances else 0.0
-
-
-# Helper function for multiprocessing BLEU score calculation
-def calculate_batch_self_bleu_123_helper(batch_idx, tokens, n_per_item):
-    """Calculate self-BLEU-123 score for a batch segment."""
-    start_idx = batch_idx * n_per_item
-    end_idx = (batch_idx + 1) * n_per_item
-    item_tokens = tokens[start_idx:end_idx]
-    return calculate_self_bleu_123(item_tokens)
-
-
-def calculate_pairwise_edit_distance_helper(batch_idx, tokens, n_per_item):
-    """Calculate average pairwise edit distance between all tokenized sequences."""
-    start_idx = batch_idx * n_per_item
-    end_idx = (batch_idx + 1) * n_per_item
-    item_tokens = tokens[start_idx:end_idx]
-    return calculate_pairwise_edit_distance(item_tokens)
