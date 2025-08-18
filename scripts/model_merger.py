@@ -191,7 +191,7 @@ if __name__ == "__main__":
 
     with torch.device("meta"):
         model: PreTrainedModel = AutoClass.from_config(
-            config, torch_dtype=torch.bfloat16
+            config
         )
 
     assert isinstance(model, PreTrainedModel)

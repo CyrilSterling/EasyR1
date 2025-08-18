@@ -24,14 +24,14 @@ def apply_ulysses_patch(model_type: str) -> None:
         ALL_ATTENTION_FUNCTIONS["flash_attention_2"] = flash_attention_forward
     elif model_type in ("qwen2_vl", "qwen2_5_vl"):
         from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-            Qwen2_5_VLFlashAttention2,
+            Qwen2_5_VLAttention,
         )
         from transformers.models.qwen2_vl.modeling_qwen2_vl import (
-            Qwen2VLFlashAttention2,
+            Qwen2VLAttention,
         )
 
-        Qwen2VLFlashAttention2.forward = qwen2_vl_attn_forward
-        Qwen2_5_VLFlashAttention2.forward = qwen2_vl_attn_forward
+        # Qwen2_5_VLAttention.forward = qwen2_vl_attn_forward
+        # Qwen2VLAttention.forward = qwen2_vl_attn_forward
     else:
         raise NotImplementedError(
             f"Model architecture {model_type} is not supported yet."

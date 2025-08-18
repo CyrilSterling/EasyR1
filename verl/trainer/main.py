@@ -17,6 +17,9 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 import json
 import sys
+import torch
+import numpy as np
+import random
 
 
 print(f"sys.executable: {sys.executable}")
@@ -120,6 +123,11 @@ class Runner:
             api_key=config.worker.reward.api_key,
             workflow_id=config.worker.reward.workflow_id,
         )
+
+        torch.manual_seed(1)
+        torch.cuda.manual_seed_all(1)
+        np.random.seed(1)
+        random.seed(1)
 
         trainer = RayPPOTrainer(
             config=config,

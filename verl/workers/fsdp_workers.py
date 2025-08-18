@@ -33,7 +33,7 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForTokenClassification,
-    AutoModelForVision2Seq,
+    AutoModelForImageTextToText,
     GenerationConfig,
     PreTrainedModel,
 )
@@ -246,8 +246,8 @@ class FSDPWorker(Worker):
 
         if self._is_critic:
             auto_class = AutoModelForTokenClassification
-        elif type(self.model_config) in AutoModelForVision2Seq._model_mapping.keys():
-            auto_class = AutoModelForVision2Seq
+        elif type(self.model_config) in AutoModelForImageTextToText._model_mapping.keys():
+            auto_class = AutoModelForImageTextToText
         else:
             auto_class = AutoModelForCausalLM
 

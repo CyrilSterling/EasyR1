@@ -53,7 +53,7 @@ mkdir -p /workspace/empty/
 
 WORKDIR=$PWD/EasyR1
 
-RAY_ADDRESS='http://127.0.0.1:8300' ray job submit \
+RAY_ADDRESS='http://127.0.0.1:8265' ray job submit \
   --working-dir /workspace/empty/ \
   --log-style pretty \
   --submission-id ${SUBMISSION_ID} \
