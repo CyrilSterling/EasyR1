@@ -37,8 +37,8 @@ algorithm:
 worker:
   actor:
     global_batch_size: 512 # increased from 128
-    micro_batch_size_per_device_for_update: 16 # increased from 1
-    micro_batch_size_per_device_for_experience: 512 # increased from 4
+    micro_batch_size_per_device_for_update: 8 # increased from 1
+    micro_batch_size_per_device_for_experience: 64 # increased from 4
     max_grad_norm: 1.0
     padding_free: true
     ulysses_sequence_parallel_size: 1
