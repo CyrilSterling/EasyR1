@@ -25,7 +25,7 @@ data:
   curriculum_update_freq: 4  # Update curriculum weights every N steps (0 means epoch-level updates)
   curriculum_mixture_ratio: 0.5  # Ratio of weighted samples in each batch (0.0 to 1.0)
   curriculum_rollout_n: 8  # Number of rollouts to generate for each prompt
-  curriculum_rollout_batch_size: 16384 # increased from 4096
+  curriculum_rollout_batch_size: 4096 # increased from 4096
 
 algorithm:
   adv_estimator: grpo
@@ -37,8 +37,8 @@ algorithm:
 worker:
   actor:
     global_batch_size: 512 # increased from 128
-    micro_batch_size_per_device_for_update: 8 # increased from 1
-    micro_batch_size_per_device_for_experience: 32 # increased from 4
+    micro_batch_size_per_device_for_update: 16 # increased from 1
+    micro_batch_size_per_device_for_experience: 512 # increased from 4
     max_grad_norm: 1.0
     padding_free: true
     ulysses_sequence_parallel_size: 1

@@ -525,6 +525,7 @@ class PaddedSequentialSampler(torch.utils.data.BatchSampler):
     def __len__(self):
         return len(self.indices)
 
+
 def calculate_distinct_n(tokenized_sequences, n):
     """Calculate distinct-n metric using model's tokenized sequences."""
     all_ngrams = []
@@ -651,9 +652,7 @@ def calculate_learnability_metric_with_dataset_and_indices(
             non_tensor_batch_keys=["raw_prompt_ids"],
         )
 
-    batch = batch.repeat(
-        repeat_times=curriculum_rollout_n, interleave=True
-    )
+    batch = batch.repeat(repeat_times=curriculum_rollout_n, interleave=True)
     batch = batch.union(gen_batch_output)
 
     return calculate_learnability_metric(
@@ -681,7 +680,7 @@ def calculate_distinct_n_metric(responses, batch_size, curriculum_rollout_n, n=3
     return torch.tensor(distinct_score, dtype=torch.float32)
 
 
-@ray.remote(max_retries=3, num_cpus=32)
+@ray.remote(max_retries=3, num_cpus=8)
 def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
     """Remote task for calculating self-BLEU-123 metric."""
     tokenized_sequences = responses.tolist()
@@ -694,13 +693,13 @@ def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
     )
 
     # Use multiprocessing to compute BLEU scores in parallel
-    with multiprocessing.Pool(processes=32) as pool:
+    with multiprocessing.Pool(processes=8) as pool:
         bleu_score = pool.map(worker_fn, range(batch_size))
 
     return torch.tensor(bleu_score, dtype=torch.float32)
 
 
-@ray.remote(max_retries=3, num_cpus=32)
+@ray.remote(max_retries=3, num_cpus=8)
 def calculate_edit_distance_metric(responses, batch_size, curriculum_rollout_n):
     """Remote task for calculating edit distance metric."""
     tokenized_sequences = responses.tolist()
@@ -711,7 +710,7 @@ def calculate_edit_distance_metric(responses, batch_size, curriculum_rollout_n):
         n_per_item=curriculum_rollout_n,
     )
 
-    with multiprocessing.Pool(processes=32) as pool:
+    with multiprocessing.Pool(processes=8) as pool:
         edit_score = pool.map(worker_fn, range(batch_size))
 
     return torch.tensor(edit_score, dtype=torch.float32)
@@ -808,7 +807,6 @@ class RayPPOTrainer:
         # Initialize workers first
         self.init_workers()
 
-        
         self.global_step = 0
         # Load checkpoint for workers and dataloader
         self._load_worker_state()
@@ -822,6 +820,7 @@ class RayPPOTrainer:
         )
 
     def _create_dataloader(self) -> None:
+        # --- Create Train Dataset ---
         self.train_dataset = RLHFDataset(
             data_path=self.config.data.train_files,
             tokenizer=self.tokenizer,
@@ -836,24 +835,25 @@ class RayPPOTrainer:
             max_pixels=self.config.data.max_pixels,
         )
 
+        # --- Create Sampler ---
+
         if self.config.data.sampling_strategy == "curriculum":
             curriculum_state = self._load_curriculum_state()
 
             # Load or compute curriculum weights
             # print(f"DEBUG: always compute curriculum weights")
             if curriculum_state is not None:
-                self.curriculum_weights = curriculum_state["curriculum_weights"]
-                self.train_dataset.curriculum_weights = self.curriculum_weights
+                self.train_dataset.curriculum_weights = curriculum_state[
+                    "curriculum_weights"
+                ]
                 print(
-                    f"Loaded curriculum weights to self.curriculum_weights"
+                    f"Loaded curriculum weights to self.train_dataset.curriculum_weights"
                 )
             else:
                 print("No curriculum state found, will compute curriculum weights")
                 self._update_curriculum_weights()
 
-            assert self.train_dataset.curriculum_weights is not None, "curriculum_weights should be initialized"
-
-            # Initialize curriculum sampler
+            # Initialize curriculum sampler (After self.train_dataset.curriculum_weights is initialized)
             sampler = self.curriculum_sampler = MixedCurriculumSampler(
                 dataset=self.train_dataset,
                 weights=self.train_dataset.curriculum_weights,
@@ -869,6 +869,12 @@ class RayPPOTrainer:
                     curriculum_state["sampler_state"]
                 )
 
+            self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
+
+            assert (
+                self.train_dataset.curriculum_weights is not None
+            ), "curriculum_weights should be initialized"
+
         elif self.config.data.sampling_strategy == "shuffle":
             train_dataloader_generator = torch.Generator()
             train_dataloader_generator.manual_seed(self.config.data.seed)
@@ -877,12 +883,16 @@ class RayPPOTrainer:
             )
         else:  # sequential
             sampler = SequentialSampler(data_source=self.train_dataset)
+        
+
+        # --- Create Train Dataloader ---
+
 
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=self.config.data.rollout_batch_size,
             sampler=sampler,
-            num_workers=32,
+            num_workers=8,
             collate_fn=collate_fn,
             pin_memory=False,
             drop_last=True,
@@ -909,7 +919,7 @@ class RayPPOTrainer:
                 else self.config.data.val_batch_size
             ),
             shuffle=False,
-            num_workers=32,
+            num_workers=8,
             collate_fn=collate_fn,
             pin_memory=False,
             drop_last=False,
@@ -1077,8 +1087,13 @@ class RayPPOTrainer:
 
             # Store the combined metric
             start_idx = batch_idx * self.config.data.curriculum_rollout_batch_size
-            end_idx = min(start_idx + self.config.data.curriculum_rollout_batch_size, len(self.train_dataset))
-            curriculum_weights[start_idx:end_idx] = combined_metric.detach()[:end_idx - start_idx]
+            end_idx = min(
+                start_idx + self.config.data.curriculum_rollout_batch_size,
+                len(self.train_dataset),
+            )
+            curriculum_weights[start_idx:end_idx] = combined_metric.detach()[
+                : end_idx - start_idx
+            ]
 
             # Log progress
             print(
@@ -1107,21 +1122,24 @@ class RayPPOTrainer:
         # Update weights with configured momentum
         momentum = self.config.data.curriculum_momentum
 
-        if self.train_dataset.curriculum_weights is None:
+        if getattr(self.train_dataset, "curriculum_weights", None) is None:
             self.train_dataset.curriculum_weights = new_weights
         else:
             self.train_dataset.curriculum_weights = (
-                momentum * self.train_dataset.curriculum_weights + (1 - momentum) * new_weights
+                momentum * self.train_dataset.curriculum_weights
+                + (1 - momentum) * new_weights
             )
 
-        # Update sampler weights (this preserves sampler state internally)
-        self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
-
         # Save updated weights
-        self._save_curriculum_weights(self.train_dataset.curriculum_weights, step=self.global_step)
+        self._save_curriculum_weights(
+            self.train_dataset.curriculum_weights, step=self.global_step
+        )
+
+        # self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
 
         # Update dataloader iterator for current epoch
-        self.dataloader_iterator = iter(self.train_dataloader)
+        # self.dataloader_iterator = iter(self.train_dataloader)
+    
 
     def _maybe_log_val_generations(
         self, inputs: List[str], outputs: List[str], scores: List[float]
@@ -1565,7 +1583,7 @@ class RayPPOTrainer:
         The light-weight advantage computation is done on the driver process.
         """
         # breakpoint()
-        val_metrics: dict[str, Any] | None= None
+        val_metrics: dict[str, Any] | None = None
 
         # perform validation before training
         if self.val_reward_fn is not None and self.config.trainer.val_before_train:
@@ -1773,14 +1791,21 @@ class RayPPOTrainer:
                             == 0
                         ):
                             with _timer("update_curriculum", timing_raw):
+                                # Update Curriculum Weights to self.train_dataset.curriculum_weights
                                 self._update_curriculum_weights()
+
+                                # Replace Internal Sampler of Curriculum Sampler with the new weights
+                                self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
+
+                                # Refresh Dataloader Iterator
+                                self.dataloader_iterator = iter(self.train_dataloader)
 
                                 # Log curriculum learning metrics
                                 curriculum_metrics = {
-                                    "curriculum/mean_weight": self.curriculum_weights.mean().item(),
-                                    "curriculum/std_weight": self.curriculum_weights.std().item(),
-                                    "curriculum/min_weight": self.curriculum_weights.min().item(),
-                                    "curriculum/max_weight": self.curriculum_weights.max().item(),
+                                    "curriculum/mean_weight": self.train_dataset.curriculum_weights.mean().item(),
+                                    "curriculum/std_weight": self.train_dataset.curriculum_weights.std().item(),
+                                    "curriculum/min_weight": self.train_dataset.curriculum_weights.min().item(),
+                                    "curriculum/max_weight": self.train_dataset.curriculum_weights.max().item(),
                                     "curriculum/consumed_batches": self.curriculum_sampler.consumed_batches,
                                     "curriculum/random_position": self.curriculum_sampler.get_training_random_position(),
                                 }
@@ -1839,14 +1864,21 @@ class RayPPOTrainer:
                 and self.config.data.curriculum_update_freq == 0
             ):
                 with _timer("update_curriculum", timing_raw):
+                    # Update Curriculum Weights to self.train_dataset.curriculum_weights
                     self._update_curriculum_weights()
+
+                    # Replace Internal Sampler of Curriculum Sampler with the new weights
+                    self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
+
+                    # Refresh Dataloader Iterator
+                    self.dataloader_iterator = iter(self.train_dataloader)
 
                     # Log curriculum learning metrics
                     curriculum_metrics = {
-                        "curriculum/mean_weight": self.curriculum_weights.mean().item(),
-                        "curriculum/std_weight": self.curriculum_weights.std().item(),
-                        "curriculum/min_weight": self.curriculum_weights.min().item(),
-                        "curriculum/max_weight": self.curriculum_weights.max().item(),
+                        "curriculum/mean_weight": self.train_dataset.curriculum_weights.mean().item(),
+                        "curriculum/std_weight": self.train_dataset.curriculum_weights.std().item(),
+                        "curriculum/min_weight": self.train_dataset.curriculum_weights.min().item(),
+                        "curriculum/max_weight": self.train_dataset.curriculum_weights.max().item(),
                         "curriculum/consumed_batches": self.curriculum_sampler.consumed_batches,
                         "curriculum/random_position": self.curriculum_sampler.get_training_random_position(),
                     }
@@ -1869,4 +1901,3 @@ class RayPPOTrainer:
             or self.global_step % self.config.trainer.save_freq != 0
         ):
             self._save_checkpoint()
-
