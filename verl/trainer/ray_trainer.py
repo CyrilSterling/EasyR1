@@ -716,7 +716,7 @@ def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
     ]
     
     # 3. 分块批量提交（避免调度器过载）
-    chunk_size = min(100, batch_size)  # 动态调整chunk大小
+    chunk_size = min(8, batch_size)  # 动态调整chunk大小
     all_futures = []
     
     for i in range(0, len(task_params), chunk_size):
