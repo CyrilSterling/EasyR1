@@ -16,7 +16,6 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
-import multiprocessing
 import os
 import os.path as osp
 import uuid
@@ -25,7 +24,6 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum, auto
-from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Type, Tuple
 
 import numpy as np
@@ -589,19 +587,16 @@ def calculate_pairwise_edit_distance(tokenized_sequences):
     return np.mean(distances) if distances else 0.0
 
 
-# Helper function for multiprocessing BLEU score calculation
-def calculate_batch_self_bleu_123_helper(batch_idx, tokens, n_per_item):
-    """Calculate self-BLEU-123 score for a batch segment."""
-    start_idx = batch_idx * n_per_item
-    end_idx = (batch_idx + 1) * n_per_item
+@ray.remote
+def calculate_single_bleu_score(tokens: List, start_idx: int, end_idx: int):
+    """Ray task for calculating single BLEU score."""
     item_tokens = tokens[start_idx:end_idx]
     return calculate_self_bleu_123(item_tokens)
 
 
-def calculate_pairwise_edit_distance_helper(batch_idx, tokens, n_per_item):
-    """Calculate average pairwise edit distance between all tokenized sequences."""
-    start_idx = batch_idx * n_per_item
-    end_idx = (batch_idx + 1) * n_per_item
+@ray.remote
+def calculate_single_edit_distance(tokens: List, start_idx: int, end_idx: int):
+    """Ray task for calculating single edit distance."""
     item_tokens = tokens[start_idx:end_idx]
     return calculate_pairwise_edit_distance(item_tokens)
 
@@ -623,19 +618,23 @@ def calculate_learnability_metric(reward_fn, batch, batch_size, curriculum_rollo
 
 
 @ray.remote(max_retries=3)
-def calculate_learnability_metric_with_dataset_and_indices(
+def calculate_learnability_metric_with_batch_data(
     reward_fn: CustomRewardManager,
+    batch_data: Dict,
     gen_batch_output: DataProto,
-    dataset: RLHFDataset,
-    indices: List[int],
     batch_size: int,
     curriculum_rollout_n: int,
 ):
-    """Remote task for calculating learnability metric with dataset and indices."""
-    batch = collate_fn([dataset[i] for i in indices])
-    batch_size = len(indices)
-
-    batch = DataProto.from_single_dict(batch)
+    """Remote task for calculating learnability metric with pre-extracted batch data.
+    
+    Args:
+        reward_fn: Can be either CustomRewardManager object or ray.ObjectRef to it
+        batch_data: Pre-extracted batch data dictionary
+        gen_batch_output: Generated batch output
+        batch_size: Size of the batch
+        curriculum_rollout_n: Number of curriculum rollouts
+    """
+    batch = DataProto.from_single_dict(batch_data)
 
     if "multi_modal_inputs" in batch.non_tensor_batch.keys():
         _ = batch.pop(
@@ -655,6 +654,8 @@ def calculate_learnability_metric_with_dataset_and_indices(
     batch = batch.repeat(repeat_times=curriculum_rollout_n, interleave=True)
     batch = batch.union(gen_batch_output)
 
+    # If reward_fn is an ObjectRef, Ray will automatically dereference it
+    # No need for explicit ray.get() as it's a top-level argument
     return calculate_learnability_metric(
         reward_fn=reward_fn,
         batch=batch,
@@ -664,56 +665,108 @@ def calculate_learnability_metric_with_dataset_and_indices(
 
 
 @ray.remote(max_retries=3)
+def calculate_single_distinct_n(shared_data_ref, start_idx: int, end_idx: int, n: int):
+    """Ray task for calculating distinct-n score for a single batch item."""
+    tokenized_sequences = ray.get(shared_data_ref)
+    sequences_slice = tokenized_sequences[start_idx:end_idx]
+    return calculate_distinct_n(sequences_slice, n=n)
+
+@ray.remote(max_retries=3)
 def calculate_distinct_n_metric(responses, batch_size, curriculum_rollout_n, n=3):
-    """Remote task for calculating distinct-n metric."""
+    """Remote task for calculating distinct-n metric with optimized centralized serialization."""
     tokenized_sequences = responses.tolist()
-    distinct_score = []
-    for i in range(batch_size):
-        distinct_score.append(
-            calculate_distinct_n(
-                tokenized_sequences[
-                    i * curriculum_rollout_n : (i + 1) * curriculum_rollout_n
-                ],
-                n=n,
-            )
-        )
-    return torch.tensor(distinct_score, dtype=torch.float32)
+    
+    # 1. 数据预处理和共享 - 一次序列化，多次使用
+    shared_data_ref = ray.put(tokenized_sequences)
+    
+    # 2. 批量任务参数准备
+    task_params = [
+        (shared_data_ref, i * curriculum_rollout_n, (i + 1) * curriculum_rollout_n, n)
+        for i in range(batch_size)
+    ]
+    
+    # 3. 分块批量提交（避免调度器过载）
+    chunk_size = min(100, batch_size)
+    all_futures = []
+    
+    for i in range(0, len(task_params), chunk_size):
+        chunk = task_params[i:i+chunk_size]
+        chunk_futures = [
+            calculate_single_distinct_n.remote(data_ref, start_idx, end_idx, n_val)
+            for data_ref, start_idx, end_idx, n_val in chunk
+        ]
+        all_futures.extend(chunk_futures)
+    
+    distinct_scores = ray.get(all_futures)
+    return torch.tensor(distinct_scores, dtype=torch.float32)
 
 
-@ray.remote(max_retries=3, num_cpus=8)
+@ray.remote(max_retries=3)
 def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
-    """Remote task for calculating self-BLEU-123 metric."""
+    """Remote task for calculating self-BLEU-123 metric using optimized Ray tasks."""
     tokenized_sequences = responses.tolist()
+    
+    # 1. 数据预处理和共享 - 一次序列化，多次使用
+    shared_data_ref = ray.put(tokenized_sequences)
 
-    # Create a partial function with fixed arguments
-    worker_fn = partial(
-        calculate_batch_self_bleu_123_helper,
-        tokens=tokenized_sequences,
-        n_per_item=curriculum_rollout_n,
-    )
+    # 2. 批量任务参数准备
+    task_params = [
+        (shared_data_ref, i * curriculum_rollout_n, (i + 1) * curriculum_rollout_n)
+        for i in range(batch_size)
+    ]
+    
+    # 3. 分块批量提交（避免调度器过载）
+    chunk_size = min(100, batch_size)  # 动态调整chunk大小
+    all_futures = []
+    
+    for i in range(0, len(task_params), chunk_size):
+        chunk = task_params[i:i+chunk_size]
+        
+        # 批量创建这个chunk的任务
+        chunk_futures = [
+            calculate_single_bleu_score.remote(data_ref, start_idx, end_idx)
+            for data_ref, start_idx, end_idx in chunk
+        ]
+        
+        all_futures.extend(chunk_futures)
+    
+    # 4. 批量收集结果
+    bleu_scores = ray.get(all_futures)
+    return torch.tensor(bleu_scores, dtype=torch.float32)
 
-    # Use multiprocessing to compute BLEU scores in parallel
-    with multiprocessing.Pool(processes=8) as pool:
-        bleu_score = pool.map(worker_fn, range(batch_size))
 
-    return torch.tensor(bleu_score, dtype=torch.float32)
-
-
-@ray.remote(max_retries=3, num_cpus=8)
+@ray.remote(max_retries=3)
 def calculate_edit_distance_metric(responses, batch_size, curriculum_rollout_n):
-    """Remote task for calculating edit distance metric."""
+    """Remote task for calculating edit distance metric using optimized Ray tasks."""
     tokenized_sequences = responses.tolist()
+    
+    # 1. 数据预处理和共享 - 一次序列化，多次使用
+    shared_data_ref = ray.put(tokenized_sequences)
 
-    worker_fn = partial(
-        calculate_pairwise_edit_distance_helper,
-        tokens=tokenized_sequences,
-        n_per_item=curriculum_rollout_n,
-    )
-
-    with multiprocessing.Pool(processes=8) as pool:
-        edit_score = pool.map(worker_fn, range(batch_size))
-
-    return torch.tensor(edit_score, dtype=torch.float32)
+    # 2. 批量任务参数准备
+    task_params = [
+        (shared_data_ref, i * curriculum_rollout_n, (i + 1) * curriculum_rollout_n)
+        for i in range(batch_size)
+    ]
+    
+    # 3. 分块批量提交（避免调度器过载）
+    chunk_size = min(100, batch_size)  # 动态调整chunk大小
+    all_futures = []
+    
+    for i in range(0, len(task_params), chunk_size):
+        chunk = task_params[i:i+chunk_size]
+        
+        # 批量创建这个chunk的任务
+        chunk_futures = [
+            calculate_single_edit_distance.remote(data_ref, start_idx, end_idx)
+            for data_ref, start_idx, end_idx in chunk
+        ]
+        
+        all_futures.extend(chunk_futures)
+    
+    # 4. 批量收集结果
+    edit_scores = ray.get(all_futures)
+    return torch.tensor(edit_scores, dtype=torch.float32)
 
 
 def combine_metric_results(
@@ -948,13 +1001,12 @@ class RayPPOTrainer:
         """Calculate the curriculum metric based on the configured strategy.
 
         Returns:
-            A dictionary containing futures for the remote metric calculations
-            and metadata needed to combine them later.
+            A list containing futures for the remote metric calculations.
         """
 
-        # --- Prepare gen batch ---
-        batch = collate_fn([dataset[i] for i in indices])
-        batch = DataProto.from_single_dict(batch)
+        # --- Prepare gen batch - extract data on driver to preserve memory mapping ---
+        batch_data = collate_fn([dataset[i] for i in indices])
+        batch = DataProto.from_single_dict(batch_data)
         batch_size = len(indices)
 
         # Generate responses for the batch - this has to be done sequentially
@@ -983,11 +1035,10 @@ class RayPPOTrainer:
 
         for metric_name in self.config.data.curriculum_metrics:
             if metric_name == "learnability":
-                future = calculate_learnability_metric_with_dataset_and_indices.remote(
+                future = calculate_learnability_metric_with_batch_data.remote(
                     reward_fn=self.reward_fn,
-                    dataset=dataset,
+                    batch_data=batch_data,  # Pass pre-extracted data instead of dataset
                     gen_batch_output=gen_batch_output,
-                    indices=indices,
                     batch_size=batch_size,
                     curriculum_rollout_n=self.config.data.curriculum_rollout_n,
                 )
@@ -1015,7 +1066,76 @@ class RayPPOTrainer:
 
             metric_futures.append(future)
 
-        # Return the futures along with metadata needed to combine them later
+        # Return the futures
+        return metric_futures
+
+    def _calculate_curriculum_metric_with_batch(
+        self, batch_data: Dict, reward_fn_ref: ray.ObjectRef = None
+    ) -> list[ray.ObjectRef]:
+        """Calculate curriculum metrics using pre-loaded batch data from dataloader."""
+        
+        batch = DataProto.from_single_dict(batch_data)
+        batch_size = len(batch)
+
+        # Generate responses for the batch - this has to be done sequentially
+        if "multi_modal_inputs" in batch.non_tensor_batch.keys():
+            gen_batch = batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=[
+                    "raw_prompt_ids",
+                    "multi_modal_data",
+                    "multi_modal_inputs",
+                ],
+            )
+        else:
+            gen_batch = batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=["raw_prompt_ids"],
+            )
+
+        # --- Generate responses ---
+        gen_batch.meta_info["n"] = self.config.data.curriculum_rollout_n
+        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+        gen_batch.meta_info.pop("n")
+
+        # --- Submit future for remote metric calculations ---
+        metric_futures = []
+
+        for metric_name in self.config.data.curriculum_metrics:
+            if metric_name == "learnability":
+                # Use reward_fn_ref if provided, otherwise fall back to self.reward_fn
+                reward_fn_to_use = reward_fn_ref if reward_fn_ref is not None else self.reward_fn
+                future = calculate_learnability_metric_with_batch_data.remote(
+                    reward_fn=reward_fn_to_use,
+                    batch_data=batch_data,  # Pass the original batch_data
+                    gen_batch_output=gen_batch_output,
+                    batch_size=batch_size,
+                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
+                )
+            elif metric_name == "distinct_3":
+                future = calculate_distinct_n_metric.remote(
+                    responses=gen_batch_output.batch["responses"],
+                    batch_size=batch_size,
+                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
+                    n=3,
+                )
+            elif metric_name == "self_bleu_123":
+                future = calculate_self_bleu_metric.remote(
+                    responses=gen_batch_output.batch["responses"],
+                    batch_size=batch_size,
+                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
+                )
+            elif metric_name == "edit_distance":
+                future = calculate_edit_distance_metric.remote(
+                    responses=gen_batch_output.batch["responses"],
+                    batch_size=batch_size,
+                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
+                )
+            else:
+                raise ValueError(f"Unknown curriculum metric: {metric_name}")
+
+            metric_futures.append(future)
+
         return metric_futures
 
     def _save_curriculum_weights(self, weights: torch.Tensor, step: int = None) -> None:
@@ -1037,33 +1157,39 @@ class RayPPOTrainer:
         print(f"Saved curriculum weights to {weights_path}")
 
     def _compute_curriculum_weights(self) -> torch.Tensor:
-        """Compute curriculum weights for each sample in the dataset by sequentially generating sequences
-        but calculating metrics in parallel, without waiting for each batch's metrics to complete.
-        """
+        """Compute curriculum weights for each sample in the dataset using dataloader for efficient loading."""
 
         curriculum_weights = torch.zeros(len(self.train_dataset), dtype=torch.float32)
+        
+        # Put reward_fn into Ray object store once to avoid repeated serialization
+        reward_fn_ref = ray.put(self.reward_fn)
+
+        # Create a temporary dataloader with padded sequential sampling
+        # Use PaddedSequentialSampler to ensure all batches have consistent size
+        padded_sampler = PaddedSequentialSampler(
+            dataset=self.train_dataset,
+            batch_size=self.config.data.curriculum_rollout_batch_size
+        )
+        
+        curriculum_dataloader = StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=self.config.data.curriculum_rollout_batch_size,
+            sampler=padded_sampler,
+            num_workers=8,  # Same as train_dataloader for prefetch
+            collate_fn=collate_fn,
+            pin_memory=False,
+            drop_last=False,  # PaddedSequentialSampler handles the padding
+        )
 
         # Process batches sequentially but don't wait for metric calculations
         metric_futures_with_batch_idx = []  # Store (batch_idx, futures_dict) tuples
 
-        # Generate sequences for all batches first, queueing metric calculations
         print("Generating sequences and launching metric calculations...")
-        indices = list(range(len(self.train_dataset)))
-        indices_padded = pad_list(
-            indices, divisor=self.config.data.curriculum_rollout_batch_size
-        )
-
-        index_batches = [
-            indices_padded[i : i + self.config.data.curriculum_rollout_batch_size]
-            for i in range(
-                0, len(indices_padded), self.config.data.curriculum_rollout_batch_size
-            )
-        ]
-
-        for batch_idx, index_batch in enumerate(index_batches):
-            # Calculate metrics, get back futures dict
-            metric_futures_cur_batch = self._calculate_curriculum_metric(
-                dataset=self.train_dataset, indices=index_batch
+        for batch_idx, batch_data in enumerate(curriculum_dataloader):
+            # Calculate metrics using pre-loaded batch_data
+            metric_futures_cur_batch = self._calculate_curriculum_metric_with_batch(
+                batch_data=batch_data,
+                reward_fn_ref=reward_fn_ref  # Pass the ObjectRef instead of the object
             )
 
             # Store batch index and futures for later collection
@@ -1085,15 +1211,16 @@ class RayPPOTrainer:
                 metrics=self.config.data.curriculum_metrics,
             )
 
-            # Store the combined metric
+            # Store the combined metric, handling potential padding
             start_idx = batch_idx * self.config.data.curriculum_rollout_batch_size
             end_idx = min(
                 start_idx + self.config.data.curriculum_rollout_batch_size,
                 len(self.train_dataset),
             )
-            curriculum_weights[start_idx:end_idx] = combined_metric.detach()[
-                : end_idx - start_idx
-            ]
+            
+            # Only assign weights to valid (non-padded) samples
+            valid_samples = end_idx - start_idx
+            curriculum_weights[start_idx:end_idx] = combined_metric.detach()[:valid_samples]
 
             # Log progress
             print(
