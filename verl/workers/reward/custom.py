@@ -16,6 +16,7 @@
 from collections import defaultdict
 from typing import Any, Callable, Dict, Tuple, TypedDict
 
+import numpy as np
 import torch
 from transformers import PreTrainedTokenizer
 
@@ -95,6 +96,9 @@ class CustomRewardManager:
         reward_metrics = defaultdict(list)
 
         if not self.batch_processing:
+            # Collect accuracy scores for batch-level variance
+            batch_accuracy_scores = []
+            
             for i in range(len(data)):
                 data_item = data[i]  # DataProtoItem
                 response_ids = data_item.batch["responses"]
@@ -109,8 +113,20 @@ class CustomRewardManager:
 
                 score = self.compute_score(response_str, ground_truth)
                 reward_tensor[i, valid_response_length - 1] = score["overall"]
+                
+                # Collect accuracy for variance computation
+                batch_accuracy_scores.append(score["accuracy"])
+                
                 for key, value in score.items():
                     reward_metrics[key].append(value)
+            
+            # Compute batch-level accuracy statistics
+            if batch_accuracy_scores:
+                reward_metrics["accuracy_variance"].append(np.var(batch_accuracy_scores))
+                reward_metrics["accuracy_std"].append(np.std(batch_accuracy_scores))
+                reward_metrics["accuracy_min"].append(np.min(batch_accuracy_scores))
+                reward_metrics["accuracy_max"].append(np.max(batch_accuracy_scores))
+            
             return reward_tensor, reward_metrics
         else:
             return self.batch_process(data, reward_tensor, reward_metrics)
@@ -175,10 +191,24 @@ class CustomRewardManager:
         print("compure_score kwargs", kwargs)
 
         scores = self.compute_score(response_strs, ground_truths, prompt_strs, **kwargs)
+        
+        # Collect accuracy scores for batch-level variance
+        batch_accuracy_scores = []
+        
         for i in range(len(data)):
             reward_tensor[i, valid_response_lengths[i] - 1] = scores[i]["overall"]
+            
+            # Collect accuracy for variance computation
+            batch_accuracy_scores.append(scores[i]["accuracy"])
 
             for key, value in scores[i].items():
                 reward_metrics[key].append(value)
+        
+        # Compute batch-level accuracy statistics
+        if batch_accuracy_scores:
+            reward_metrics["accuracy_variance"].append(np.var(batch_accuracy_scores))
+            reward_metrics["accuracy_std"].append(np.std(batch_accuracy_scores))
+            reward_metrics["accuracy_min"].append(np.min(batch_accuracy_scores))
+            reward_metrics["accuracy_max"].append(np.max(batch_accuracy_scores))
 
         return reward_tensor, reward_metrics
