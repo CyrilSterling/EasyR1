@@ -8,7 +8,7 @@ SYSTEM_PROMPT="""A conversation between User and Assistant. The User provides an
 
 CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main \
     config=examples/debug.yaml \
-    data.system_prompt="${SYSTEM_PROMPT}" \
+    data.system_prompt="${SYSTEM_PROMPT}"
 
 
 

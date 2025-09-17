@@ -28,7 +28,7 @@ The simplest approach - randomly samples from the dataset:
 ```bash
 JOB_NAME=my_shuffle_training \
 MODEL_PATH=/path/to/your/model \
-bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
+bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
     data.train_files=/path/to/training/data \
     data.max_response_length=4096 \
     data.sampling_strategy=shuffle \
@@ -47,7 +47,7 @@ Processes samples in order, useful for debugging or specific ordering requiremen
 ```bash
 JOB_NAME=my_sequential_training \
 MODEL_PATH=/path/to/your/model \
-bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
+bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
     data.train_files=/path/to/training/data \
     data.sampling_strategy=sequential \
     trainer.total_episodes=10 \
@@ -62,7 +62,7 @@ Advanced strategy that dynamically weights samples based on difficulty metrics:
 ```bash
 JOB_NAME=my_curriculum_basic \
 MODEL_PATH=/path/to/your/model \
-bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
+bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
     data.train_files=/path/to/training/data \
     data.sampling_strategy=curriculum \
     'data.curriculum_metrics=[learnability]' \
@@ -77,7 +77,7 @@ bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
 ```bash
 JOB_NAME=my_curriculum_advanced \
 MODEL_PATH=/path/to/your/model \
-bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
+bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
     data.train_files=/path/to/training/data \
     data.sampling_strategy=curriculum \
     'data.curriculum_metrics=[learnability,self-bleu]' \
@@ -134,7 +134,7 @@ bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
 ```bash
 JOB_NAME=production_curriculum_v1 \
 MODEL_PATH=/models/qwen2.5-vl-3b-instruct \
-bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
+bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
     data.train_files=/data/training/math_reasoning_15k \
     data.val_files=/data/validation/math_vista \
     data.max_response_length=4096 \
@@ -160,7 +160,7 @@ bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
 ```bash
 JOB_NAME=test_shuffle \
 MODEL_PATH=/models/test_model \
-bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
+bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
     data.train_files=/data/small_dataset \
     data.sampling_strategy=shuffle \
     trainer.total_episodes=2 \
@@ -173,7 +173,7 @@ bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
 ```bash
 JOB_NAME=distributed_training \
 MODEL_PATH=/models/large_model \
-bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
+bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
     data.train_files=/data/large_dataset \
     data.sampling_strategy=curriculum \
     'data.curriculum_metrics=[learnability]' \
@@ -267,7 +267,7 @@ Resume from a checkpoint:
 ```bash
 JOB_NAME=resume_training \
 MODEL_PATH=/path/to/model \
-bash EasyR1/examples/mmr1/qwen2_5_vl_3b_mmr1_pub8k_wollm.sh \
+bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
     trainer.load_checkpoint_path=/checkpoints/previous_run/global_step_100 \
     trainer.save_checkpoint_path=/checkpoints/${JOB_NAME} \
     trainer.total_episodes=20  # Continue for more episodes
