@@ -1,219 +1,112 @@
-# EasyR1 Training Guide
+# EasyR1 Curriculum Learning Guide
 
-This guide provides comprehensive instructions for launching RLHF training with EasyR1, based on the examples in `scripts/submit.fish`.
+This guide provides comprehensive instructions for using curriculum learning strategies in EasyR1, including advanced sampling techniques for RLHF training.
 
-## Prerequisites
-
-1. **Installation**
-```bash
-# Install dependencies
-pip install -r requirements.txt
-```
-
-2. **Environment Variables**
-Create a `.env` file in the project root (optional):
-```bash
-# .env
-MODEL_PATH=/path/to/default/model
-```
-
-## Training Strategies
+## Overview
 
 EasyR1 supports three main sampling strategies for training:
 
-### 1. Shuffle Strategy (Random Sampling)
+- **Shuffle**: Random sampling from the dataset
+- **Sequential**: Process samples in order
+- **Curriculum**: Dynamic sample weighting based on difficulty metrics
 
-The simplest approach - randomly samples from the dataset:
+## Quick Start
+
+### Basic Training with Shuffle Strategy
 
 ```bash
-JOB_NAME=my_shuffle_training \
-MODEL_PATH=/path/to/your/model \
-bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
+JOB_NAME=my_training \
+MODEL_PATH=Qwen/Qwen2.5-VL-3B-Instruct \
+bash examples/mmr1/train_qwen2_5_vl_3b.sh \
     data.train_files=/path/to/training/data \
-    data.max_response_length=4096 \
     data.sampling_strategy=shuffle \
-    data.val_files=/path/to/validation/data \
-    trainer.total_episodes=10 \
-    worker.rollout.n=32 \
-    trainer.nnodes=1 \
-    trainer.val_freq=4 \
-    trainer.save_checkpoint_path=/path/to/checkpoints/${JOB_NAME}
+    trainer.total_episodes=10
 ```
 
-### 2. Sequential Strategy
-
-Processes samples in order, useful for debugging or specific ordering requirements:
+### Curriculum Learning with Learnability Metric
 
 ```bash
-JOB_NAME=my_sequential_training \
-MODEL_PATH=/path/to/your/model \
-bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
-    data.train_files=/path/to/training/data \
-    data.sampling_strategy=sequential \
-    trainer.total_episodes=10 \
-    trainer.save_checkpoint_path=/path/to/checkpoints/${JOB_NAME}
-```
-
-### 3. Curriculum Learning Strategy
-
-Advanced strategy that dynamically weights samples based on difficulty metrics:
-
-#### Basic Curriculum with Learnability
-```bash
-JOB_NAME=my_curriculum_basic \
-MODEL_PATH=/path/to/your/model \
-bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
+JOB_NAME=curriculum_training \
+MODEL_PATH=Qwen/Qwen2.5-VL-3B-Instruct \
+bash examples/mmr1/train_qwen2_5_vl_3b.sh \
     data.train_files=/path/to/training/data \
     data.sampling_strategy=curriculum \
     'data.curriculum_metrics=[learnability]' \
     'data.curriculum_metric_weights=[1.0]' \
-    data.curriculum_update_freq=8 \
     data.curriculum_mixture_ratio=0.5 \
-    trainer.total_episodes=10 \
-    trainer.save_checkpoint_path=/path/to/checkpoints/${JOB_NAME}
+    trainer.total_episodes=10
 ```
 
-#### Advanced Curriculum with Multiple Metrics
+## Curriculum Learning Features
+
+### Available Metrics
+
+- **learnability**: Measures sample difficulty based on model performance
+- **distinct**: N-gram diversity in generated responses
+- **self-bleu**: Similarity between generated responses
+- **edit-distance**: Pairwise edit distance between responses
+
+### Key Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `curriculum_metrics` | List of metrics for weighting | `[learnability]` |
+| `curriculum_metric_weights` | Weights for combining metrics | `[1.0]` |
+| `curriculum_mixture_ratio` | Ratio of weighted vs random sampling (0.0-1.0) | `0.5` |
+| `curriculum_update_freq` | Update weights every N steps (0 for epoch-level) | `4` |
+| `curriculum_rollout_n` | Number of rollouts for metric calculation | `8` |
+| `curriculum_momentum` | Momentum for weight updates | `0.0` |
+
+## Advanced Examples
+
+### Multi-Metric Curriculum Learning
+
+Combine learnability and diversity metrics:
+
 ```bash
-JOB_NAME=my_curriculum_advanced \
-MODEL_PATH=/path/to/your/model \
-bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
-    data.train_files=/path/to/training/data \
+JOB_NAME=advanced_curriculum \
+MODEL_PATH=Qwen/Qwen2.5-VL-3B-Instruct \
+bash examples/mmr1/train_qwen2_5_vl_3b.sh \
+    data.train_files=/path/to/data \
     data.sampling_strategy=curriculum \
     'data.curriculum_metrics=[learnability,self-bleu]' \
     'data.curriculum_metric_weights=[0.8,0.2]' \
-    data.curriculum_update_freq=8 \
     data.curriculum_mixture_ratio=0.8 \
-    data.curriculum_rollout_n=8 \
-    trainer.total_episodes=10 \
-    trainer.save_checkpoint_path=/path/to/checkpoints/${JOB_NAME}
+    data.curriculum_update_freq=8 \
+    trainer.total_episodes=10
 ```
 
-## Key Configuration Parameters
+### Production Training Configuration
 
-### Data Configuration
-- `data.train_files`: Training dataset path
-- `data.val_files`: Validation dataset path
-- `data.max_response_length`: Maximum response length in tokens (default: 8192)
-- `data.max_prompt_length`: Maximum prompt length in tokens (default: 2048)
-- `data.rollout_batch_size`: Batch size for rollout generation (default: 2048)
-- `data.sampling_strategy`: Choose from "shuffle", "sequential", or "curriculum"
-
-### Curriculum-Specific Parameters
-- `data.curriculum_metrics`: List of metrics for sample weighting
-  - `learnability`: Measures sample difficulty based on model performance
-  - `distinct`: N-gram diversity in generated responses
-  - `self-bleu`: Similarity between generated responses
-  - `edit-distance`: Pairwise edit distance between responses
-- `data.curriculum_metric_weights`: Weights for combining multiple metrics
-- `data.curriculum_mixture_ratio`: Ratio of weighted vs random sampling (0.0-1.0)
-  - 0.0 = fully random sampling
-  - 1.0 = fully weighted sampling
-  - 0.5 = 50% weighted, 50% random
-- `data.curriculum_update_freq`: Update weights every N steps (0 for epoch-level)
-- `data.curriculum_rollout_n`: Number of rollouts per sample for metric calculation
-
-### Training Configuration
-- `trainer.total_episodes`: Number of training episodes
-- `trainer.nnodes`: Number of nodes for distributed training
-- `trainer.n_gpus_per_node`: GPUs per node (default: 8)
-- `trainer.val_freq`: Validation frequency (-1 to disable)
-- `trainer.save_freq`: Checkpoint save frequency
-- `trainer.save_checkpoint_path`: Directory to save checkpoints
-- `trainer.experiment_name`: Name for wandb/tensorboard tracking
-
-### Worker Configuration
-- `worker.rollout.n`: Number of response samples per prompt during training
-- `worker.rollout.temperature`: Sampling temperature
-- `worker.actor.global_batch_size`: Global batch size for training
-- `worker.actor.optim.lr`: Learning rate
-
-## Complete Example Configurations
-
-### Example 1: Production Training with Curriculum Learning
 ```bash
-JOB_NAME=production_curriculum_v1 \
-MODEL_PATH=/models/qwen2.5-vl-3b-instruct \
-bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
-    data.train_files=/data/training/math_reasoning_15k \
-    data.val_files=/data/validation/math_vista \
+JOB_NAME=production_v1 \
+MODEL_PATH=Qwen/Qwen2.5-VL-7B-Instruct \
+bash examples/mmr1/train_qwen2_5_vl_3b.sh \
+    data.train_files=/data/large_dataset \
     data.max_response_length=4096 \
     data.sampling_strategy=curriculum \
-    'data.curriculum_metrics=[learnability,self-bleu]' \
-    'data.curriculum_metric_weights=[0.8,0.2]' \
-    data.curriculum_mixture_ratio=0.8 \
-    data.curriculum_update_freq=8 \
-    data.curriculum_rollout_n=8 \
-    trainer.total_episodes=10 \
-    trainer.nnodes=1 \
-    trainer.n_gpus_per_node=8 \
-    trainer.val_freq=4 \
-    trainer.save_freq=5 \
-    trainer.save_checkpoint_path=/checkpoints/${JOB_NAME} \
-    worker.rollout.n=32 \
-    worker.rollout.temperature=0.6 \
-    worker.actor.global_batch_size=512 \
-    worker.actor.optim.lr=1.0e-6
-```
-
-### Example 2: Quick Testing with Shuffle
-```bash
-JOB_NAME=test_shuffle \
-MODEL_PATH=/models/test_model \
-bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
-    data.train_files=/data/small_dataset \
-    data.sampling_strategy=shuffle \
-    trainer.total_episodes=2 \
-    trainer.val_freq=-1 \
-    worker.rollout.n=4 \
-    trainer.save_checkpoint_path=/tmp/test_checkpoints
-```
-
-### Example 3: Multi-Node Distributed Training
-```bash
-JOB_NAME=distributed_training \
-MODEL_PATH=/models/large_model \
-bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
-    data.train_files=/data/large_dataset \
-    data.sampling_strategy=curriculum \
-    'data.curriculum_metrics=[learnability]' \
+    'data.curriculum_metrics=[learnability,distinct,self-bleu]' \
+    'data.curriculum_metric_weights=[0.6,0.2,0.2]' \
+    data.curriculum_mixture_ratio=0.7 \
+    data.curriculum_update_freq=10 \
+    data.curriculum_rollout_n=16 \
     trainer.total_episodes=20 \
     trainer.nnodes=4 \
     trainer.n_gpus_per_node=8 \
-    worker.actor.fsdp.fsdp_size=32 \
-    trainer.save_checkpoint_path=/distributed_checkpoints/${JOB_NAME}
+    worker.rollout.n=32 \
+    worker.actor.global_batch_size=512
 ```
 
-## Direct Python Usage
+## Configuration via YAML
 
-For more control, you can directly invoke the Python training script:
-
-```python
-python -m verl.trainer.main \
-    config=EasyR1/examples/mmr1_b200.yaml \
-    data.train_files=/path/to/data \
-    data.system_prompt="Your custom system prompt" \
-    worker.actor.model.model_path=/path/to/model \
-    trainer.experiment_name=my_experiment \
-    trainer.total_episodes=10 \
-    data.sampling_strategy=curriculum \
-    'data.curriculum_metrics=[learnability,distinct]' \
-    'data.curriculum_metric_weights=[0.7,0.3]'
-```
-
-## Custom Configuration File
-
-Create your own YAML configuration:
+Create a custom configuration file:
 
 ```yaml
-# my_custom_config.yaml
+# custom_curriculum.yaml
 defaults:
-  - mmr1_b200  # Inherit from base config
+  - mmr1_b200
 
 data:
-  train_files: /my/training/data
-  val_files: /my/validation/data
-  max_response_length: 4096
   sampling_strategy: curriculum
   curriculum_metrics:
     - learnability
@@ -223,75 +116,96 @@ data:
     - 0.3
   curriculum_mixture_ratio: 0.6
   curriculum_update_freq: 10
-
-trainer:
-  total_episodes: 15
-  n_gpus_per_node: 4
-  experiment_name: my_custom_experiment
-
-worker:
-  rollout:
-    n: 16
-    temperature: 0.7
-  actor:
-    optim:
-      lr: 5.0e-7
+  curriculum_rollout_n: 12
 ```
 
-Then use it:
-```bash
-python -m verl.trainer.main config=my_custom_config.yaml
-```
-
-## Monitoring & Logging
-
-Training progress is automatically logged to Weights & Biases:
+Use with:
 
 ```bash
-# View metrics including:
-# - Training loss and rewards
-# - Curriculum weight distribution
-# - Sample difficulty metrics
-# - Validation performance
-# - Generated sample quality
-
-# Configure project and experiment names
-trainer.project_name=my_project \
-trainer.experiment_name=experiment_v1
+python -m verl.trainer.main config=custom_curriculum.yaml
 ```
 
-## Resume Training
+## Mixture Ratio Guidelines
 
-Resume from a checkpoint:
+The `curriculum_mixture_ratio` controls the balance between weighted and random sampling:
 
-```bash
-JOB_NAME=resume_training \
-MODEL_PATH=/path/to/model \
-bash EasyR1/examples/mmr1/train_qwen2_5_vl_3b.sh \
-    trainer.load_checkpoint_path=/checkpoints/previous_run/global_step_100 \
-    trainer.save_checkpoint_path=/checkpoints/${JOB_NAME} \
-    trainer.total_episodes=20  # Continue for more episodes
-```
+| Ratio | Effect | Use Case |
+|-------|--------|----------|
+| 0.0 | Fully random | Equivalent to shuffle strategy |
+| 0.2 | 20% weighted, 80% random | Light curriculum influence |
+| 0.5 | Balanced | Good starting point |
+| 0.8 | 80% weighted, 20% random | Strong curriculum focus |
+| 1.0 | Fully weighted | Pure curriculum learning |
 
-## Tips for Different Scenarios
+## Update Frequency Strategies
+
+| Setting | Behavior | Best For |
+|---------|----------|----------|
+| 0 | Epoch-level updates | Small datasets |
+| 4 | Every 4 steps | Balanced approach |
+| 8-10 | Less frequent | Large datasets |
+| 20+ | Infrequent | Stable training |
+
+## Performance Tips
 
 ### For Small Datasets (<10K samples)
-- Use smaller `curriculum_rollout_batch_size` (e.g., 256)
-- Consider `curriculum_update_freq=0` for epoch-level updates
-- Lower `curriculum_rollout_n` to reduce computation (e.g., 4)
+- Use `curriculum_update_freq=0` for epoch-level updates
+- Lower `curriculum_rollout_n` to 4-8
+- Consider higher `curriculum_momentum` (0.5-0.9)
 
 ### For Large Models (>30B parameters)
-- Enable gradient checkpointing: `worker.actor.model.enable_gradient_checkpointing=true`
-- Use CPU offloading if needed: `worker.actor.fsdp.enable_cpu_offload=true`
-- Reduce batch sizes and increase gradient accumulation
+- Reduce `curriculum_rollout_batch_size` to manage memory
+- Use fewer curriculum metrics to reduce computation
+- Consider `curriculum_update_freq=20+` for stability
 
 ### For Quick Experimentation
-- Disable validation: `trainer.val_freq=-1`
-- Use fewer rollouts: `worker.rollout.n=4`
-- Save less frequently: `trainer.save_freq=10`
+- Start with single metric: `'data.curriculum_metrics=[learnability]'`
+- Use `curriculum_mixture_ratio=0.5` as baseline
+- Set `curriculum_rollout_n=4` for faster iteration
 
-### For Production Deployment
-- Enable all validation: `trainer.val_before_train=true`
-- Use appropriate checkpoint limits: `trainer.save_limit=10`
-- Monitor curriculum metrics closely
-- Use higher `curriculum_rollout_n` for better metric estimation (e.g., 16-32)
+## Monitoring Curriculum Learning
+
+Track these metrics in wandb/tensorboard:
+- `curriculum/mean_weight`: Average sample weight
+- `curriculum/std_weight`: Weight distribution spread
+- `curriculum/min_weight`, `curriculum/max_weight`: Weight range
+- `curriculum/consumed_batches`: Training progress
+- `curriculum/random_position`: Mix of weighted vs random samples
+
+## Resume from Checkpoint
+
+Curriculum weights and sampler state are automatically saved:
+
+```bash
+trainer.load_checkpoint_path=/checkpoints/previous_run/global_step_100 \
+trainer.save_checkpoint_path=/checkpoints/continued_run
+```
+
+## Troubleshooting
+
+### Issue: Weights not updating
+- Check `curriculum_update_freq` is set appropriately
+- Verify metrics are being calculated (check logs)
+- Ensure `curriculum_rollout_batch_size` is reasonable
+
+### Issue: Training instability
+- Reduce `curriculum_mixture_ratio` for more randomness
+- Increase `curriculum_momentum` for smoother updates
+- Use fewer or simpler metrics
+
+### Issue: Slow metric computation
+- Reduce `curriculum_rollout_n`
+- Increase `curriculum_rollout_batch_size`
+- Use fewer metrics or simpler metrics (e.g., just learnability)
+
+## Citation
+
+If you use curriculum learning in EasyR1, please cite:
+
+```bibtex
+@software{easyr1_curriculum,
+  title={EasyR1: Scalable RLHF with Curriculum Learning},
+  year={2024},
+  publisher={ByteDance},
+}
+```
