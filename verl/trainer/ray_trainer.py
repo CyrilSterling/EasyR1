@@ -31,14 +31,13 @@ import ray
 import ray.exceptions
 import torch
 from codetiming import Timer
-from Levenshtein import distance
-from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 from PIL import Image
 from ray.experimental.tqdm_ray import tqdm
-from torch.utils.data import RandomSampler, SequentialSampler, WeightedRandomSampler
+from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
+from ..curriculum import CurriculumManager
 from ..protocol import DataProto, pad_dataproto_to_divisor, unpad_dataproto
 from ..single_controller.base import Worker
 from ..single_controller.ray import (
@@ -58,714 +57,183 @@ from ..utils.seqlen_balancing import (
 )
 from ..workers.fsdp_workers import FSDPWorker
 from . import core_algos
-from .config import PPOConfig
-from .metrics import (
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    reduce_metrics,
+from .config import (
+    ActorRolloutConfig,
+    AdvantageEstimator,
+    PPOConfig,
+    RefPolicyConfig,
+    RewardModelConfig,
 )
 from ..workers.reward import CustomRewardManager
 
 
-# Allow very large images
-Image.MAX_IMAGE_PIXELS = None
+class WorkerType(IntEnum):
+    """Worker type used for clarity and worker initialization"""
+
+    ACTOR = 0
+    CRITIC = 1
+    REF_POLICY = 2
+    REWARD_MODEL = 3
+    ACTOR_ROLLOUT = 4  # the hybrid engine
+    DUMMY = 100  # never used in real experiments
 
 
-WorkerType = Type[Worker]
+class Role(Enum):
+    """The role of workers"""
 
-
-class Role(IntEnum):
-    """
-    To create more roles dynamically, you can subclass Role and add new members
-    """
-
-    Actor = auto()
-    Rollout = auto()
+    Policy = auto()
     ActorRollout = auto()
     Critic = auto()
     RefPolicy = auto()
     RewardModel = auto()
-    ActorRolloutRef = auto()
-
-
-class AdvantageEstimator(str, Enum):
-    """
-    Using an enumeration class to avoid spelling errors in adv_estimator
-    """
-
-    GAE = "gae"
-    GRPO = "grpo"
-    REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
-    REMAX = "remax"
-    RLOO = "rloo"
-
-
-@dataclass
-class ResourcePoolManager:
-    """
-    Define a resource pool specification. Resource pool will be initialized first.
-    """
-
-    resource_pool_spec: dict[str, list[int]]
-    mapping: dict[Role, str]
-    resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
-
-    def create_resource_pool(self):
-        for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
-            # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
-            # For Megatron backend, we recommend using max_colocate_count>1 that can utilize different WorkerGroup for different models
-            resource_pool = RayResourcePool(
-                process_on_nodes=process_on_nodes,
-                use_gpu=True,
-                max_colocate_count=1,
-                name_prefix=resource_pool_name,
-            )
-            self.resource_pool_dict[resource_pool_name] = resource_pool
-
-        self._check_resource_available()
-
-    def get_resource_pool(self, role: Role) -> RayResourcePool:
-        """Get the resource pool of the worker."""
-        return self.resource_pool_dict[self.mapping[role]]
-
-    def get_n_gpus(self) -> int:
-        """Get the number of gpus in this cluster."""
-        return sum(
-            [
-                n_gpus
-                for process_on_nodes in self.resource_pool_spec.values()
-                for n_gpus in process_on_nodes
-            ]
-        )
-
-    def _check_resource_available(self):
-        """Check if the resource pool can be satisfied in this ray cluster."""
-        node_available_resources = ray.state.available_resources_per_node()
-        node_available_gpus = {
-            node: node_info.get("GPU", 0)
-            for node, node_info in node_available_resources.items()
-        }
-
-        # check total required gpus can be satisfied
-        total_available_gpus = sum(node_available_gpus.values())
-        total_required_gpus = sum(
-            [
-                n_gpus
-                for process_on_nodes in self.resource_pool_spec.values()
-                for n_gpus in process_on_nodes
-            ]
-        )
-        if total_available_gpus < total_required_gpus:
-            raise ValueError(
-                f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}."
-            )
-
-
-def apply_kl_penalty(
-    data: DataProto, kl_ctrl: core_algos.KLController, kl_penalty="kl"
-):
-    token_level_scores = data.batch["token_level_scores"]
-    batch_size = data.batch.batch_size[0]
-    response_mask = data.batch["response_mask"]
-
-    # compute kl between ref_policy and current policy
-    if "ref_log_probs" in data.batch.keys():
-        kld = core_algos.kl_penalty(
-            data.batch["old_log_probs"],
-            data.batch["ref_log_probs"],
-            kl_penalty=kl_penalty,
-        )  # (batch_size, response_length)
-        kld = kld * response_mask
-        beta = kl_ctrl.value
-    else:
-        beta = 0
-        kld = torch.zeros_like(response_mask, dtype=torch.float32)
-
-    token_level_rewards = token_level_scores - beta * kld
-
-    current_kl = VF.masked_mean(
-        kld, mask=response_mask, dim=-1
-    )  # average over sequence
-    current_kl = torch.mean(current_kl, dim=0).item()
-
-    # According to https://github.com/huggingface/trl/blob/v0.11.0/trl/trainer/ppo_trainer.py#L880
-    kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
-    data.batch["token_level_rewards"] = token_level_rewards
-
-    metrics = {"critic/kl": current_kl, "critic/kl_coef": beta}
-    return data, metrics
-
-
-def compute_advantage(
-    data: DataProto,
-    adv_estimator: AdvantageEstimator,
-    gamma: float = 1.0,
-    lam: float = 1.0,
-):
-    token_level_rewards = data.batch["token_level_rewards"]
-    response_mask = data.batch["response_mask"]
-    index = data.non_tensor_batch["uid"]
-    if adv_estimator == AdvantageEstimator.GAE:
-        values = data.batch["values"]
-        advantages, returns = core_algos.compute_gae_advantage_return(
-            token_level_rewards=token_level_rewards,
-            values=values,
-            eos_mask=response_mask,
-            gamma=gamma,
-            lam=lam,
-        )
-    elif adv_estimator == AdvantageEstimator.GRPO:
-        advantages, returns = core_algos.compute_grpo_outcome_advantage(
-            token_level_rewards=token_level_rewards, eos_mask=response_mask, index=index
-        )
-    elif adv_estimator == AdvantageEstimator.REINFORCE_PLUS_PLUS:
-        advantages, returns = core_algos.compute_reinforce_plus_plus_outcome_advantage(
-            token_level_rewards=token_level_rewards, eos_mask=response_mask, gamma=gamma
-        )
-    elif adv_estimator == AdvantageEstimator.REMAX:
-        reward_baselines = data.batch["reward_baselines"]
-        advantages, returns = core_algos.compute_remax_outcome_advantage(
-            token_level_rewards=token_level_rewards,
-            reward_baselines=reward_baselines,
-            eos_mask=response_mask,
-        )
-    elif adv_estimator == AdvantageEstimator.RLOO:
-        advantages, returns = core_algos.compute_rloo_outcome_advantage(
-            token_level_rewards=token_level_rewards, eos_mask=response_mask, index=index
-        )
-    else:
-        raise NotImplementedError
-
-    data.batch["advantages"] = advantages
-    data.batch["returns"] = returns
-    return data
+    Dummy = auto()  # for testing
 
 
 @contextmanager
-def _timer(name: str, timing_raw: dict[str, float]):
-    with Timer(name=name, logger=None) as timer:
-        yield
-
+def _timer(name, timing_raw):
+    timer = Timer(name, logger=None)
+    timer.start()
+    yield
+    timer.stop()
     timing_raw[name] = timer.last
 
 
-class CurriculumWeightedSampler(WeightedRandomSampler):
-    """Custom weighted sampler that supports dynamic weight updates."""
-
-    def __init__(self, weights, num_samples, replacement=True, generator=None):
-        super().__init__(weights, num_samples, replacement, generator)
-        self.weights = weights
-
-    def update_weights(self, new_weights):
-        """Update the sampling weights."""
-        self.weights = new_weights
-
-
-class MixedCurriculumSampler(torch.utils.data.Sampler):
-    """Custom sampler that mixes random and weighted sampling."""
+class ResourcePoolManager:
+    """Manager resource pools for different roles."""
 
     def __init__(
         self,
-        dataset,
-        weights,
-        batch_size,
-        mixture_ratio=0.5,
-        replacement=True,
-        generator=None,
+        role_worker_mapping: Dict[Role, Type[Worker]],
+        use_hybrid_engine: bool = True,
+        use_reference_policy: bool = True,
+        use_critic: bool = True,
+        use_reward_model: bool = False,
+        actor_config: ActorRolloutConfig = None,
+        critic_config: ActorRolloutConfig = None,
+        ref_policy_config: RefPolicyConfig = None,
+        reward_model_config: RewardModelConfig = None,
     ):
-        self.dataset = dataset
-        self.weights = weights
-        self.batch_size = batch_size
-        self.mixture_ratio = mixture_ratio
-        self.replacement = replacement
-        self.generator = generator
-        self.dataset_size = len(dataset)
+        """Init the ResourcePoolManager.
 
-        # Calculate number of samples of each type per batch
-        self.n_weighted_per_batch = int(batch_size * mixture_ratio)
-        self.n_random_per_batch = batch_size - self.n_weighted_per_batch
+        Args:
+            role_worker_mapping: mapping from role to worker class.
+            actor_config: actor configuration.
+            critic_config: critic configuration.
+            ref_policy_config: reference policy configuration.
+            reward_model_config: reward model configuration.
+        """
+        self.role_worker_mapping = role_worker_mapping
+        self.use_hybrid_engine = use_hybrid_engine
+        self.use_reference_policy = use_reference_policy
+        self.use_critic = use_critic
+        self.use_reward_model = use_reward_model
+        self.actor_config = actor_config
+        self.critic_config = critic_config
+        self.ref_policy_config = ref_policy_config
+        self.reward_model_config = reward_model_config
 
-        # Track total number of random indices needed for the entire dataset
-        self.total_random_indices_needed = (
-            self.dataset_size // self.batch_size
-        ) * self.n_random_per_batch
-        if self.dataset_size % self.batch_size > 0:
-            self.total_random_indices_needed += self.dataset_size % self.batch_size
+    def create_resource_pool(self):
+        """Create resource pools for different roles.
+        We have the following resource pools:
+        - ActorRollout (hybrid engine): Used for actor rollout with generation and training.
+        - Policy (non-hybrid engine): Used for actor training only
+        - Critic: Used for critic training
+        - RefPolicy: Used for computing reference log probs
+        - RewardModel: Used for computing reward
 
-        # Create weighted sampler for the entire dataset
-        self.weighted_sampler = WeightedRandomSampler(
-            weights=weights,
-            num_samples=self.dataset_size,  # Sample as many as the dataset size
-            replacement=replacement,
-            generator=generator,
-        )
+        Not all resource pools are required.
+        Hybrid engine: ActorRollout, Critic, RefPolicy (optional), RewardModel (optional)
+        Non-hybrid engine: Policy, Critic, RefPolicy (optional), RewardModel (optional)
+        """
+        # Rank 0 must be allocated to rollout in the model name mapping
+        resource_pool_dict = {}
 
-        # Initialize random indices pool and tracking
-        self._init_random_indices()
-
-        # Cache for mixed indices to handle multiple calls to __iter__
-        self.cached_mixed_indices = None
-
-        # Separate tracking variable for actual consumed batches in training
-        self.consumed_batches = 0
-
-    def _init_random_indices(self):
-        """Initialize random indices - creating a pool of random indices for the dataset."""
-        # Create a random permutation of all indices
-        if self.generator is not None:
-            rand_indices = torch.randperm(
-                len(self.dataset), generator=self.generator
-            ).tolist()
+        if self.use_hybrid_engine:
+            if Role.ActorRollout not in self.role_worker_mapping:
+                raise ValueError("Hybrid engine requires actor rollout worker.")
+            resource_pool_dict[Role.ActorRollout] = RayResourcePool(
+                process_cls=RayClassWithInitArgs(
+                    self.role_worker_mapping[Role.ActorRollout],
+                    **self.actor_config.to_dict(),
+                ),
+                name=Role.ActorRollout.name,
+                num_workers=self.actor_config.parallel_num,
+                use_gpu=self.actor_config.use_gpu,
+            )
         else:
-            import random
+            if Role.Policy not in self.role_worker_mapping:
+                raise ValueError("Non-hybrid engine requires policy worker.")
+            resource_pool_dict[Role.Policy] = RayResourcePool(
+                process_cls=RayClassWithInitArgs(
+                    self.role_worker_mapping[Role.Policy],
+                    **self.actor_config.to_dict(),
+                ),
+                name=Role.Policy.name,
+                num_workers=self.actor_config.parallel_num,
+                use_gpu=self.actor_config.use_gpu,
+            )
 
-            rand_indices = list(range(len(self.dataset)))
-            random.shuffle(rand_indices)
+        if self.use_critic:
+            if Role.Critic not in self.role_worker_mapping:
+                raise ValueError("Critic worker is required if use_critic is True.")
+            resource_pool_dict[Role.Critic] = RayResourcePool(
+                process_cls=RayClassWithInitArgs(
+                    self.role_worker_mapping[Role.Critic], **self.critic_config.to_dict()
+                ),
+                name=Role.Critic.name,
+                num_workers=self.critic_config.parallel_num,
+                use_gpu=self.critic_config.use_gpu,
+            )
 
-        # Store the entire random permutation
-        self.random_indices_pool = rand_indices
-        # Position tracker for random indices used for initial index creation
-        self.random_indices_position = 0
-
-    def _get_next_random_indices(self, n):
-        """Get next n random indices from our pre-shuffled pool, cycling if needed."""
-        # If we're near the end of our pool, we need to cycle back
-        if self.random_indices_position + n > len(self.random_indices_pool):
-            # Just wrap around to the beginning without reshuffling
-            self.random_indices_position = 0
-
-        # Get the indices
-        indices = self.random_indices_pool[
-            self.random_indices_position : self.random_indices_position + n
-        ]
-        self.random_indices_position += n
-        return indices
-
-    def get_training_random_position(self):
-        """Get the current position in random indices used for actual training.
-        This is separate from the position used during index generation.
-        """
-        # Simply use modulo to handle wrap-around consistently with _get_next_random_indices
-        return (self.consumed_batches * self.n_random_per_batch) % len(
-            self.random_indices_pool
-        )
-
-    def update_position_after_batch(self):
-        """Update tracking of consumed batches after each batch is processed in training.
-        This should be called after each batch is processed in the training loop.
-        """
-        # Increment the number of consumed batches
-        self.consumed_batches += 1
-
-    def __iter__(self):
-        # Only compute indices if they haven't been cached
-        if self.cached_mixed_indices is None:
-            # Get all indices from weighted sampler
-            weighted_indices = list(self.weighted_sampler)
-
-            # Shuffle the weighted indices
-            if self.generator is not None:
-                rand_tensor = torch.randperm(
-                    len(weighted_indices), generator=self.generator
+        if self.use_reference_policy:
+            if Role.RefPolicy not in self.role_worker_mapping:
+                raise ValueError(
+                    "Reference policy worker is required if use_reference_policy is True."
                 )
-                weighted_indices = [weighted_indices[i] for i in rand_tensor]
-            else:
-                import random
-
-                random.shuffle(weighted_indices)
-
-            # Create batches that maintain the mixture ratio
-            mixed_indices = []
-            num_batches = self.dataset_size // self.batch_size
-
-            # Synchronize the position counter with the actual training position
-            # This ensures we continue from where training left off rather than restarting
-            self.random_indices_position = self.get_training_random_position()
-
-            for batch_idx in range(num_batches):
-                # Calculate start indices for weighted part
-                w_start = batch_idx * self.n_weighted_per_batch
-
-                # Get indices for this batch
-                batch_weighted = weighted_indices[
-                    w_start : w_start + self.n_weighted_per_batch
-                ]
-                # Get random indices from our tracked pool
-                batch_random = self._get_next_random_indices(self.n_random_per_batch)
-
-                # Interleave the indices to maintain diversity within the batch
-                batch_indices = []
-                for i in range(max(len(batch_weighted), len(batch_random))):
-                    if i < len(batch_weighted):
-                        batch_indices.append(batch_weighted[i])
-                    if i < len(batch_random):
-                        batch_indices.append(batch_random[i])
-
-                mixed_indices.extend(batch_indices)
-
-            # Handle remaining samples if dataset size is not divisible by batch size
-            remaining = self.dataset_size % self.batch_size
-            if remaining > 0:
-                w_start = num_batches * self.n_weighted_per_batch
-
-                n_remaining_weighted = int(remaining * self.mixture_ratio)
-                n_remaining_random = remaining - n_remaining_weighted
-
-                batch_weighted = weighted_indices[
-                    w_start : w_start + n_remaining_weighted
-                ]
-                batch_random = self._get_next_random_indices(n_remaining_random)
-
-                batch_indices = []
-                for i in range(max(len(batch_weighted), len(batch_random))):
-                    if i < len(batch_weighted):
-                        batch_indices.append(batch_weighted[i])
-                    if i < len(batch_random):
-                        batch_indices.append(batch_random[i])
-
-                mixed_indices.extend(batch_indices)
-
-            # Store the computed indices
-            self.cached_mixed_indices = mixed_indices
-
-        # Return iterator of cached indices
-        return iter(self.cached_mixed_indices)
-
-    def __len__(self):
-        return self.dataset_size
-
-    def update_weights(self, new_weights):
-        """Update the sampling weights."""
-        self.weights = new_weights
-        self.weighted_sampler = WeightedRandomSampler(
-            weights=new_weights,
-            num_samples=self.dataset_size,
-            replacement=self.replacement,
-            generator=self.generator,
-        )
-        # Reset the cached indices to force regeneration with new weights
-        self.cached_mixed_indices = None
-        # Note: We don't reset random indices - this preserves their state between updates
-
-    def state_dict(self):
-        """Return the state dictionary for checkpointing."""
-        return {
-            "consumed_batches": self.consumed_batches,
-            "random_indices_pool": self.random_indices_pool,
-            "random_indices_position": self.random_indices_position,
-            "weights": (
-                self.weights.clone() if torch.is_tensor(self.weights) else self.weights
-            ),
-            "generator_state": (
-                self.generator.get_state() if self.generator is not None else None
-            ),
-        }
-
-    def load_state_dict(self, state_dict):
-        """Load state from a state dictionary."""
-        self.consumed_batches = state_dict.get("consumed_batches", 0)
-        self.random_indices_pool = state_dict.get(
-            "random_indices_pool", list(range(len(self.dataset)))
-        )
-        self.random_indices_position = state_dict.get("random_indices_position", 0)
-        self.weights = state_dict.get("weights", self.weights)
-
-        # Restore generator state if available
-        if state_dict.get("generator_state") is not None and self.generator is not None:
-            try:
-                self.generator.set_state(state_dict["generator_state"])
-            except Exception as e:
-                pass  # Ignore generator state restoration failures
-
-        # Update the weighted sampler with restored weights
-        self.weighted_sampler = WeightedRandomSampler(
-            weights=self.weights,
-            num_samples=self.dataset_size,
-            replacement=self.replacement,
-            generator=self.generator,
-        )
-
-        # Reset cached indices to force regeneration with restored state
-        self.cached_mixed_indices = None
-
-
-
-def pad_list(lst: list, divisor: int):
-    """Pad a list to the nearest multiple of divisor."""
-    return lst + [lst[-1]] * ((divisor - len(lst)) % divisor)
-
-
-class PaddedSequentialSampler(torch.utils.data.BatchSampler):
-    """Custom sampler that pads each batch to the same batch size."""
-
-    def __init__(self, dataset, batch_size):
-        self.dataset = dataset
-        pad_to_length = (len(dataset) + batch_size - 1) // batch_size * batch_size
-        self.indices = list(range(pad_to_length))
-        self.indices[len(dataset) :] = [len(dataset) - 1] * (
-            pad_to_length - len(dataset)
-        )
-
-    def __iter__(self):
-        """Generate padded batches of the same size."""
-        for i in self.indices:
-            yield i
-
-    def __len__(self):
-        return len(self.indices)
-
-
-def calculate_distinct_n(tokenized_sequences, n):
-    """Calculate distinct-n metric using model's tokenized sequences."""
-    all_ngrams = []
-    for seq in tokenized_sequences:
-        all_ngrams.extend(list(zip(*[seq[i:] for i in range(n)])))
-
-    if not all_ngrams:
-        return 0.0
-
-    unique_ngrams = set(all_ngrams)
-    return len(unique_ngrams) / len(all_ngrams)
-
-
-def calculate_self_bleu_n(tokenized_sequences, n):
-    """Calculate self-BLEU score for specific n-gram using model's tokenized sequences."""
-    if len(tokenized_sequences) < 2:
-        return 0.0
-
-    weights = tuple([1.0] if n == 1 else [0.0] * (n - 1) + [1.0])  # Only use n-gram
-    scores = []
-
-    for i, hyp in enumerate(tokenized_sequences):
-        refs = tokenized_sequences[:i] + tokenized_sequences[i + 1 :]
-        score = sentence_bleu(
-            refs, hyp, weights=weights, smoothing_function=SmoothingFunction().method1
-        )
-        scores.append(score)
-
-    return np.mean(scores)
-
-
-def calculate_self_bleu_123(tokenized_sequences):
-    """Calculate self-BLEU-123 score with uniform weights using model's tokenized sequences."""
-    if len(tokenized_sequences) < 2:
-        return 0.0
-
-    weights = (1 / 3, 1 / 3, 1 / 3)  # Uniform weights for 1,2,3-grams
-    scores = []
-
-    for i, hyp in enumerate(tokenized_sequences):
-        refs = tokenized_sequences[:i] + tokenized_sequences[i + 1 :]
-        score = sentence_bleu(
-            refs, hyp, weights=weights, smoothing_function=SmoothingFunction().method1
-        )
-        scores.append(score)
-
-    return np.mean(scores)
-
-
-def calculate_pairwise_edit_distance(tokenized_sequences):
-    """Calculate average pairwise edit distance between all tokenized sequences."""
-    if len(tokenized_sequences) < 2:
-        return 0.0
-
-    distances = []
-    for i in range(len(tokenized_sequences)):
-        for j in range(i + 1, len(tokenized_sequences)):
-            dist = distance(tokenized_sequences[i], tokenized_sequences[j])
-            distances.append(dist)
-
-    return np.mean(distances) if distances else 0.0
-
-
-@ray.remote
-def calculate_single_bleu_score(tokens: List, start_idx: int, end_idx: int):
-    """Ray task for calculating single BLEU score."""
-    item_tokens = tokens[start_idx:end_idx]
-    return calculate_self_bleu_123(item_tokens)
-
-
-@ray.remote
-def calculate_single_edit_distance(tokens: List, start_idx: int, end_idx: int):
-    """Ray task for calculating single edit distance."""
-    item_tokens = tokens[start_idx:end_idx]
-    return calculate_pairwise_edit_distance(item_tokens)
-
-
-def calculate_learnability_metric(reward_fn, batch, batch_size, curriculum_rollout_n):
-    """Remote task for calculating learnability metric."""
-    reward_tensor, reward_metrics = reward_fn(batch)
-    # reshape to (batch_size, n, max_len)
-    acc_reward_tensor = torch.tensor(
-        reward_metrics["accuracy"], dtype=torch.float32
-    ).view(batch_size, curriculum_rollout_n, -1)
-
-    # Calculate pass rate and learnability
-    pass_rate = acc_reward_tensor.mean(dim=-1).mean(
-        dim=-1
-    )  # sequence-level average over rollouts
-    learnability = pass_rate * (1 - pass_rate)
-    return learnability
-
-
-@ray.remote(max_retries=3)
-def calculate_learnability_metric_with_batch_data(
-    reward_fn: CustomRewardManager,
-    batch_data: Dict,
-    gen_batch_output: DataProto,
-    batch_size: int,
-    curriculum_rollout_n: int,
-):
-    """Remote task for calculating learnability metric with pre-extracted batch data."""
-    batch = DataProto.from_single_dict(batch_data)
-
-    if "multi_modal_inputs" in batch.non_tensor_batch.keys():
-        _ = batch.pop(
-            batch_keys=["input_ids", "attention_mask", "position_ids"],
-            non_tensor_batch_keys=[
-                "raw_prompt_ids",
-                "multi_modal_data",
-                "multi_modal_inputs",
-            ],
-        )
-    else:
-        _ = batch.pop(
-            batch_keys=["input_ids", "attention_mask", "position_ids"],
-            non_tensor_batch_keys=["raw_prompt_ids"],
-        )
-
-    batch = batch.repeat(repeat_times=curriculum_rollout_n, interleave=True)
-    batch = batch.union(gen_batch_output)
-
-    # If reward_fn is an ObjectRef, Ray will automatically dereference it
-    # No need for explicit ray.get() as it's a top-level argument
-    return calculate_learnability_metric(
-        reward_fn=reward_fn,
-        batch=batch,
-        batch_size=batch_size,
-        curriculum_rollout_n=curriculum_rollout_n,
-    )
-
-
-@ray.remote(max_retries=3)
-def calculate_single_distinct_n(shared_data_ref, start_idx: int, end_idx: int, n: int):
-    """Ray task for calculating distinct-n score for a single batch item."""
-    tokenized_sequences = ray.get(shared_data_ref)
-    sequences_slice = tokenized_sequences[start_idx:end_idx]
-    return calculate_distinct_n(sequences_slice, n=n)
-
-@ray.remote(max_retries=3)
-def calculate_distinct_n_metric(responses, batch_size, curriculum_rollout_n, n=3):
-    """Remote task for calculating distinct-n metric with optimized centralized serialization."""
-    tokenized_sequences = responses.tolist()
-
-    # Share data once for all tasks - single serialization for multiple uses
-    shared_data_ref = ray.put(tokenized_sequences)
-
-    # Prepare batch task parameters
-    task_params = [
-        (shared_data_ref, i * curriculum_rollout_n, (i + 1) * curriculum_rollout_n, n)
-        for i in range(batch_size)
-    ]
-
-    # Submit in chunks to avoid scheduler overload
-    chunk_size = min(100, batch_size)
-    all_futures = []
-    
-    for i in range(0, len(task_params), chunk_size):
-        chunk = task_params[i:i+chunk_size]
-        chunk_futures = [
-            calculate_single_distinct_n.remote(data_ref, start_idx, end_idx, n_val)
-            for data_ref, start_idx, end_idx, n_val in chunk
-        ]
-        all_futures.extend(chunk_futures)
-    
-    distinct_scores = ray.get(all_futures)
-    return torch.tensor(distinct_scores, dtype=torch.float32)
-
-
-@ray.remote(max_retries=3)
-def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
-    """Remote task for calculating self-BLEU-123 metric using optimized Ray tasks."""
-    tokenized_sequences = responses.tolist()
-
-    # Share data once for all tasks - single serialization for multiple uses
-    shared_data_ref = ray.put(tokenized_sequences)
-
-    # Prepare batch task parameters
-    task_params = [
-        (shared_data_ref, i * curriculum_rollout_n, (i + 1) * curriculum_rollout_n)
-        for i in range(batch_size)
-    ]
-
-    # Submit in chunks to avoid scheduler overload
-    chunk_size = min(8, batch_size)  # Dynamically adjust chunk size
-    all_futures = []
-    
-    for i in range(0, len(task_params), chunk_size):
-        chunk = task_params[i:i+chunk_size]
-        
-        # Create tasks for this chunk in batch
-        chunk_futures = [
-            calculate_single_bleu_score.remote(data_ref, start_idx, end_idx)
-            for data_ref, start_idx, end_idx in chunk
-        ]
-        
-        all_futures.extend(chunk_futures)
-    
-    # Collect all results in batch
-    bleu_scores = ray.get(all_futures)
-    return torch.tensor(bleu_scores, dtype=torch.float32)
-
-
-@ray.remote(max_retries=3)
-def calculate_edit_distance_metric(responses, batch_size, curriculum_rollout_n):
-    """Remote task for calculating edit distance metric using optimized Ray tasks."""
-    tokenized_sequences = responses.tolist()
-
-    # Share data once for all tasks - single serialization for multiple uses
-    shared_data_ref = ray.put(tokenized_sequences)
-
-    # Prepare batch task parameters
-    task_params = [
-        (shared_data_ref, i * curriculum_rollout_n, (i + 1) * curriculum_rollout_n)
-        for i in range(batch_size)
-    ]
-
-    # Submit in chunks to avoid scheduler overload
-    chunk_size = min(100, batch_size)  # Dynamically adjust chunk size
-    all_futures = []
-    
-    for i in range(0, len(task_params), chunk_size):
-        chunk = task_params[i:i+chunk_size]
-        
-        # Create tasks for this chunk in batch
-        chunk_futures = [
-            calculate_single_edit_distance.remote(data_ref, start_idx, end_idx)
-            for data_ref, start_idx, end_idx in chunk
-        ]
-        
-        all_futures.extend(chunk_futures)
-    
-    # Collect all results in batch
-    edit_scores = ray.get(all_futures)
-    return torch.tensor(edit_scores, dtype=torch.float32)
-
-
-def combine_metric_results(
-    results: list[torch.Tensor], weights: list[float], metrics: list[str]
-) -> torch.Tensor:
-    """Combine metric results with their weights."""
-    weighted_sum = None
-    for i, (result, metric) in enumerate(zip(results, metrics)):
-        weight = weights[i]
-        if weighted_sum is None:
-            weighted_sum = result * weight
-        else:
-            weighted_sum += result * weight
-    return weighted_sum
+            resource_pool_dict[Role.RefPolicy] = RayResourcePool(
+                process_cls=RayClassWithInitArgs(
+                    self.role_worker_mapping[Role.RefPolicy],
+                    **self.ref_policy_config.to_dict(),
+                ),
+                name=Role.RefPolicy.name,
+                num_workers=self.ref_policy_config.parallel_num,
+                use_gpu=self.ref_policy_config.use_gpu,
+            )
+
+        if self.use_reward_model:
+            if Role.RewardModel not in self.role_worker_mapping:
+                raise ValueError(
+                    "Reward model worker is required if use_reward_model is True."
+                )
+            resource_pool_dict[Role.RewardModel] = RayResourcePool(
+                process_cls=RayClassWithInitArgs(
+                    self.role_worker_mapping[Role.RewardModel],
+                    **self.reward_model_config.to_dict(),
+                ),
+                name=Role.RewardModel.name,
+                num_workers=self.reward_model_config.parallel_num,
+                use_gpu=self.reward_model_config.use_gpu,
+            )
+
+        self.resource_pool_dict = resource_pool_dict
+
+    def get_resource_pool(self, role: Role) -> RayResourcePool:
+        """Get resource pool by role."""
+        return self.resource_pool_dict[role]
+
+    def get_all_resource_pools(self) -> List[RayResourcePool]:
+        """Get all resource pools."""
+        return list(self.resource_pool_dict.values())
+
+
+def _convert_str_to_args(config, mapping: Dict[str, Type]):
+    """Internal function to convert string to class type"""
+    for key, value in mapping.items():
+        keys = key.split(".")
+        current_config = config
+        for k in keys[:-1]:
+            current_config = getattr(current_config, k)
+        setattr(current_config, keys[-1], value)
 
 
 class RayPPOTrainer:
@@ -790,15 +258,8 @@ class RayPPOTrainer:
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
 
-        self.hybrid_engine = config.worker.hybrid_engine
-        if self.hybrid_engine:
-            assert (
-                Role.ActorRollout in role_worker_mapping
-            ), f"ActorRollout should be included in {role_worker_mapping.keys()}."
-        else:
-            raise NotImplementedError
-
         self.role_worker_mapping = role_worker_mapping
+        self.hybrid_engine = config.worker.hybrid_engine
         self.resource_pool_manager = resource_pool_manager
         self.use_reward_model = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -849,7 +310,17 @@ class RayPPOTrainer:
         # Then create dataloader which depends on workers
         self._create_dataloader()
 
-        # Curriculum related variables
+        # Initialize curriculum manager if needed
+        self.curriculum_manager = None
+        if self.config.data.sampling_strategy == "curriculum":
+            self.curriculum_manager = CurriculumManager(
+                config=self.config,
+                train_dataset=self.train_dataset,
+                actor_rollout_wg=self.actor_rollout_wg,
+                reward_fn=self.reward_fn,
+                checkpoint_path=self.checkpoint_path,
+            )
+
         self.logger = Tracker(
             loggers=self.config.trainer.logger, config=self.config.to_dict()
         )
@@ -871,35 +342,16 @@ class RayPPOTrainer:
         )
 
         # --- Create Sampler ---
-
         if self.config.data.sampling_strategy == "curriculum":
-            curriculum_state = self._load_curriculum_state()
-
-            # Load or compute curriculum weights
-            if curriculum_state is not None:
-                self.train_dataset.curriculum_weights = curriculum_state[
-                    "curriculum_weights"
-                ]
-            else:
-                self._update_curriculum_weights()
-
-            # Initialize curriculum sampler (After self.train_dataset.curriculum_weights is initialized)
-            sampler = self.curriculum_sampler = MixedCurriculumSampler(
-                dataset=self.train_dataset,
-                weights=self.train_dataset.curriculum_weights,
-                batch_size=self.config.data.rollout_batch_size,
-                mixture_ratio=self.config.data.curriculum_mixture_ratio,
-                replacement=True,  # Always use replacement for weighted sampling
-                generator=torch.Generator().manual_seed(self.config.data.seed),
-            )
-
-            # Load curriculum sampler state if available
-            if curriculum_state is not None:
-                self.curriculum_sampler.load_state_dict(
-                    curriculum_state["sampler_state"]
+            if self.curriculum_manager is None:
+                self.curriculum_manager = CurriculumManager(
+                    config=self.config,
+                    train_dataset=self.train_dataset,
+                    actor_rollout_wg=self.actor_rollout_wg,
+                    reward_fn=self.reward_fn,
+                    checkpoint_path=self.checkpoint_path,
                 )
-
-            self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
+            sampler = self.curriculum_manager.get_sampler()
 
         elif self.config.data.sampling_strategy == "shuffle":
             train_dataloader_generator = torch.Generator()
@@ -907,16 +359,18 @@ class RayPPOTrainer:
             sampler = RandomSampler(
                 data_source=self.train_dataset, generator=train_dataloader_generator
             )
-        else:  # sequential
+        elif self.config.data.sampling_strategy == "sequential":
             sampler = SequentialSampler(data_source=self.train_dataset)
-        
+        else:
+            raise NotImplementedError(
+                f"Sampling strategy {self.config.data.sampling_strategy} is not implemented."
+            )
 
         # --- Create Train Dataloader ---
-
-
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=self.config.data.rollout_batch_size,
+            shuffle=False,  # shuffle is handled by sampler
             sampler=sampler,
             num_workers=8,
             collate_fn=collate_fn,
@@ -924,6 +378,7 @@ class RayPPOTrainer:
             drop_last=True,
         )
 
+        # --- Create Val Dataset and Dataloader ---
         self.val_dataset = RLHFDataset(
             data_path=self.config.data.val_files,
             tokenizer=self.tokenizer,
@@ -937,6 +392,7 @@ class RayPPOTrainer:
             min_pixels=self.config.data.min_pixels,
             max_pixels=self.config.data.max_pixels,
         )
+
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             batch_size=(
@@ -965,258 +421,6 @@ class RayPPOTrainer:
         self.config.worker.actor.optim.training_steps = training_steps
         self.config.worker.critic.optim.training_steps = training_steps
 
-    def _calculate_curriculum_metric(
-        self, dataset: RLHFDataset, indices: List[int]
-    ) -> list[ray.ObjectRef]:
-        """Calculate the curriculum metric based on the configured strategy.
-
-        Returns:
-            A list containing futures for the remote metric calculations.
-        """
-
-        # Prepare gen batch
-        batch_data = collate_fn([dataset[i] for i in indices])
-        batch = DataProto.from_single_dict(batch_data)
-        batch_size = len(indices)
-
-        # Generate responses for the batch
-        if "multi_modal_inputs" in batch.non_tensor_batch.keys():
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=[
-                    "raw_prompt_ids",
-                    "multi_modal_data",
-                    "multi_modal_inputs",
-                ],
-            )
-        else:
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids"],
-            )
-
-        # Generate responses
-        gen_batch.meta_info["n"] = self.config.data.curriculum_rollout_n
-        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-        gen_batch.meta_info.pop("n")
-
-        # Submit futures for remote metric calculations
-        metric_futures = []
-
-        for metric_name in self.config.data.curriculum_metrics:
-            if metric_name == "learnability":
-                future = calculate_learnability_metric_with_batch_data.remote(
-                    reward_fn=self.reward_fn,
-                    batch_data=batch_data,  # Pass pre-extracted data instead of dataset
-                    gen_batch_output=gen_batch_output,
-                    batch_size=batch_size,
-                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
-                )
-            elif metric_name == "distinct_3":
-                future = calculate_distinct_n_metric.remote(
-                    responses=gen_batch_output.batch["responses"],
-                    batch_size=batch_size,
-                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
-                    n=3,
-                )
-            elif metric_name == "self_bleu_123":
-                future = calculate_self_bleu_metric.remote(
-                    responses=gen_batch_output.batch["responses"],
-                    batch_size=batch_size,
-                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
-                )
-            elif metric_name == "edit_distance":
-                future = calculate_edit_distance_metric.remote(
-                    responses=gen_batch_output.batch["responses"],
-                    batch_size=batch_size,
-                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
-                )
-            else:
-                raise ValueError(f"Unknown curriculum metric: {metric_name}")
-
-            metric_futures.append(future)
-
-        # Return the futures
-        return metric_futures
-
-    def _calculate_curriculum_metric_with_batch(
-        self, batch_data: Dict, reward_fn_ref: ray.ObjectRef = None
-    ) -> list[ray.ObjectRef]:
-        """Calculate curriculum metrics using pre-loaded batch data from dataloader."""
-        
-        batch = DataProto.from_single_dict(batch_data)
-        batch_size = len(batch)
-
-        # Generate responses for the batch
-        if "multi_modal_inputs" in batch.non_tensor_batch.keys():
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=[
-                    "raw_prompt_ids",
-                    "multi_modal_data",
-                    "multi_modal_inputs",
-                ],
-            )
-        else:
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids"],
-            )
-
-        # Generate responses
-        gen_batch.meta_info["n"] = self.config.data.curriculum_rollout_n
-        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-        gen_batch.meta_info.pop("n")
-
-        # Submit futures for remote metric calculations
-        metric_futures = []
-
-        for metric_name in self.config.data.curriculum_metrics:
-            if metric_name == "learnability":
-                # Use reward_fn_ref if provided, otherwise fall back to self.reward_fn
-                reward_fn_to_use = reward_fn_ref if reward_fn_ref is not None else self.reward_fn
-                future = calculate_learnability_metric_with_batch_data.remote(
-                    reward_fn=reward_fn_to_use,
-                    batch_data=batch_data,  # Pass the original batch_data
-                    gen_batch_output=gen_batch_output,
-                    batch_size=batch_size,
-                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
-                )
-            elif metric_name == "distinct_3":
-                future = calculate_distinct_n_metric.remote(
-                    responses=gen_batch_output.batch["responses"],
-                    batch_size=batch_size,
-                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
-                    n=3,
-                )
-            elif metric_name == "self_bleu_123":
-                future = calculate_self_bleu_metric.remote(
-                    responses=gen_batch_output.batch["responses"],
-                    batch_size=batch_size,
-                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
-                )
-            elif metric_name == "edit_distance":
-                future = calculate_edit_distance_metric.remote(
-                    responses=gen_batch_output.batch["responses"],
-                    batch_size=batch_size,
-                    curriculum_rollout_n=self.config.data.curriculum_rollout_n,
-                )
-            else:
-                raise ValueError(f"Unknown curriculum metric: {metric_name}")
-
-            metric_futures.append(future)
-
-        return metric_futures
-
-    def _save_curriculum_weights(self, weights: torch.Tensor, step: int = None) -> None:
-        """Save curriculum weights to a file."""
-        # Create directory if it doesn't exist
-        weights_dir = os.path.join(
-            self.config.trainer.save_checkpoint_path, "curriculum_weights"
-        )
-        os.makedirs(weights_dir, exist_ok=True)
-
-        # Create filename based on step (if provided) or use 'initial'
-        filename = (
-            f"weights_step_{step}.pt" if step is not None else "initial_weights.pt"
-        )
-        weights_path = os.path.join(weights_dir, filename)
-
-        # Save weights
-        torch.save(weights, weights_path)
-
-    def _compute_curriculum_weights(self) -> torch.Tensor:
-        """Compute curriculum weights for each sample in the dataset using dataloader for efficient loading."""
-
-        curriculum_weights = torch.zeros(len(self.train_dataset), dtype=torch.float32)
-        
-        # Put reward_fn into Ray object store once
-        reward_fn_ref = ray.put(self.reward_fn)
-
-        # Create a temporary dataloader with padded sequential sampling
-        padded_sampler = PaddedSequentialSampler(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.curriculum_rollout_batch_size
-        )
-        
-        curriculum_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.curriculum_rollout_batch_size,
-            sampler=padded_sampler,
-            num_workers=8,  # Same as train_dataloader for prefetch
-            collate_fn=collate_fn,
-            pin_memory=False,
-            drop_last=False,  # PaddedSequentialSampler handles the padding
-        )
-
-        # Process batches sequentially but don't wait for metric calculations
-        metric_futures_with_batch_idx = []  # Store (batch_idx, futures_dict) tuples
-
-        for batch_idx, batch_data in enumerate(curriculum_dataloader):
-            # Calculate metrics using pre-loaded batch_data
-            metric_futures_cur_batch = self._calculate_curriculum_metric_with_batch(
-                batch_data=batch_data,
-                reward_fn_ref=reward_fn_ref  # Pass the ObjectRef instead of the object
-            )
-
-            # Store batch index and futures for later collection
-            metric_futures_with_batch_idx.append((batch_idx, metric_futures_cur_batch))
-
-        # Now process all the pending futures
-        for batch_idx, futures in metric_futures_with_batch_idx:
-            # Collect results from futures
-            metric_results = ray.get(futures)
-
-            # Combine the metric results for this batch
-            combined_metric = combine_metric_results(
-                metric_results,
-                weights=self.config.data.curriculum_metric_weights,
-                metrics=self.config.data.curriculum_metrics,
-            )
-
-            # Store the combined metric, handling potential padding
-            start_idx = batch_idx * self.config.data.curriculum_rollout_batch_size
-            end_idx = min(
-                start_idx + self.config.data.curriculum_rollout_batch_size,
-                len(self.train_dataset),
-            )
-            
-            # Only assign weights to valid (non-padded) samples
-            valid_samples = end_idx - start_idx
-            curriculum_weights[start_idx:end_idx] = combined_metric.detach()[:valid_samples]
-
-        # Normalize weights using min-max scaling
-        min_weight = curriculum_weights.min()
-        max_weight = curriculum_weights.max()
-        curriculum_weights = (curriculum_weights - min_weight) / (
-            max_weight
-            - min_weight
-            + 1e-8  # Add small epsilon to avoid division by zero
-        )
-
-        return curriculum_weights
-
-    def _update_curriculum_weights(self) -> None:
-        """Update curriculum learning weights based on current model performance."""
-        # Create a temporary dataloader for weight estimation
-        new_weights = self._compute_curriculum_weights()
-
-        # Update weights with configured momentum
-        momentum = self.config.data.curriculum_momentum
-
-        if getattr(self.train_dataset, "curriculum_weights", None) is None:
-            self.train_dataset.curriculum_weights = new_weights
-        else:
-            self.train_dataset.curriculum_weights = (
-                momentum * self.train_dataset.curriculum_weights
-                + (1 - momentum) * new_weights
-            )
-
-        # Save updated weights
-        self._save_curriculum_weights(
-            self.train_dataset.curriculum_weights, step=self.global_step
-        )
-
     def _maybe_log_val_generations(
         self, inputs: List[str], outputs: List[str], scores: List[float]
     ) -> None:
@@ -1232,24 +436,38 @@ class RayPPOTrainer:
         rng = np.random.RandomState(42)
         rng.shuffle(samples)
 
-        samples = samples[: self.config.trainer.val_generations_to_log]
-        self.logger.log_generation(samples, self.global_step)
+        # Take first N samples for logging
+        n_samples = min(self.config.trainer.val_generations_to_log, len(samples))
+        log_samples = samples[:n_samples]
+
+        # Prepare table data
+        table_data = []
+        for inp, out, score in log_samples:
+            table_data.append(
+                {"Input": inp[:200], "Output": out[:500], "Score": f"{score:.3f}"}
+            )
+
+        self.logger.log(data={"val/generations": table_data}, step=self.global_step)
 
     def _validate(self) -> dict[str, Any]:
         reward_tensor_lst = []
-        # Lists to collect samples for the table
-        sample_inputs, sample_outputs, sample_scores = [], [], []
         reward_metrics_lst = defaultdict(list)
-        for test_data in self.val_dataloader:
-            test_batch = DataProto.from_single_dict(test_data)
-            # Store original inputs
+        sample_inputs = []
+        sample_outputs = []
+        sample_scores = []
+
+        for test_batch_dict in tqdm(
+            self.val_dataloader, desc="Validation", position=1
+        ):
+            test_batch: DataProto = DataProto.from_single_dict(test_batch_dict)
+            # Store prompt texts for logging
             input_ids = test_batch.batch["input_ids"]
             input_texts = [
-                self.tokenizer.decode(ids, skip_special_tokens=True)
-                for ids in input_ids
+                self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids
             ]
             sample_inputs.extend(input_texts)
 
+            # pop those keys for generation
             if "multi_modal_inputs" in test_batch.non_tensor_batch.keys():
                 test_gen_batch = test_batch.pop(
                     batch_keys=["input_ids", "attention_mask", "position_ids"],
@@ -1265,12 +483,10 @@ class RayPPOTrainer:
                     non_tensor_batch_keys=["raw_prompt_ids"],
                 )
 
-            test_gen_batch.meta_info = self.config.worker.rollout.val_override_config
-            test_gen_batch, pad_size = pad_dataproto_to_divisor(
-                test_gen_batch, self.actor_rollout_wg.world_size
-            )
+            # Generate a batch
+            pad_size = 0
             test_output_gen_batch = self.actor_rollout_wg.generate_sequences(
-                test_gen_batch
+                test_gen_batch, add_padding_to_divisor=True
             )
             test_output_gen_batch = unpad_dataproto(
                 test_output_gen_batch, pad_size=pad_size
@@ -1321,231 +537,115 @@ class RayPPOTrainer:
             )
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.ActorRollout],
-                config=self.config.worker,
-                role="actor_rollout",
+                config=self.config.worker.actor_rollout.to_dict(),
             )
-            self.resource_pool_to_cls[resource_pool][
-                "actor_rollout"
-            ] = actor_rollout_cls
+            self.resource_pool_to_cls[resource_pool][Role.ActorRollout] = (
+                actor_rollout_cls
+            )
+
+            self.actor_rollout_wg = self.ray_worker_group_cls(
+                resource_pool=resource_pool, ray_cls_with_init=actor_rollout_cls
+            )
         else:
-            raise NotImplementedError
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Policy)
+            policy_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.Policy],
+                config=self.config.worker.actor.to_dict(),
+            )
+            self.resource_pool_to_cls[resource_pool][Role.Policy] = policy_cls
+
+            self.policy_wg = self.ray_worker_group_cls(
+                resource_pool=resource_pool, ray_cls_with_init=policy_cls
+            )
+
+            self.actor_rollout_wg = self.policy_wg
 
         # create critic
         if self.use_critic:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
             critic_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.Critic],
-                config=self.config.worker,
-                role="critic",
+                config=self.config.worker.critic.to_dict(),
             )
-            self.resource_pool_to_cls[resource_pool]["critic"] = critic_cls
+            self.resource_pool_to_cls[resource_pool][Role.Critic] = critic_cls
 
-        # create reference policy if needed
+            self.critic_wg = self.ray_worker_group_cls(
+                resource_pool=resource_pool, ray_cls_with_init=critic_cls
+            )
+
+        # create reference policy
         if self.use_reference_policy:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
             ref_policy_cls = RayClassWithInitArgs(
-                self.role_worker_mapping[Role.RefPolicy],
-                config=self.config.worker,
-                role="ref",
+                cls=self.role_worker_mapping[Role.RefPolicy],
+                config=self.config.worker.ref.to_dict(),
             )
-            self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
+            self.resource_pool_to_cls[resource_pool][Role.RefPolicy] = ref_policy_cls
 
-        # create a reward model if reward_fn is None
+            self.ref_policy_wg = self.ray_worker_group_cls(
+                resource_pool=resource_pool, ray_cls_with_init=ref_policy_cls
+            )
+
+        # create reward model
         if self.use_reward_model:
-            # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(
                 Role.RewardModel
             )
-            rm_cls = RayClassWithInitArgs(
+            reward_model_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.RewardModel],
-                config=self.config.worker,
-                role="reward",
+                config=self.config.worker.reward_model.to_dict(),
             )
-            self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
-
-        # initialize WorkerGroup
-        # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
-        # you should not use `create_colocated_worker_cls`. Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
-        all_wg: dict[str, FSDPWorker] = {}
-        self.wg_dicts = []
-        for resource_pool, class_dict in self.resource_pool_to_cls.items():
-            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            wg_dict = self.ray_worker_group_cls(
-                resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls
+            self.resource_pool_to_cls[resource_pool][Role.RewardModel] = (
+                reward_model_cls
             )
-            spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
-            all_wg.update(spawn_wg)
-            # keep the reference of WorkerDict to support ray >= 2.31. Ref: https://github.com/ray-project/ray/pull/45699
-            self.wg_dicts.append(wg_dict)
 
-        if self.use_critic:
-            self.critic_wg = all_wg["critic"]
-            self.critic_wg.init_model()
+            self.reward_model_wg = self.ray_worker_group_cls(
+                resource_pool=resource_pool, ray_cls_with_init=reward_model_cls
+            )
 
-        if self.use_reference_policy:
-            self.ref_policy_wg = all_wg["ref"]
-            self.ref_policy_wg.init_model()
-
-        if self.use_reward_model:
-            self.rm_wg = all_wg["rm"]
-            self.rm_wg.init_model()
-
-        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_wg = all_wg["actor_rollout"]
-        self.actor_rollout_wg.init_model()
-
-        # Initialize fault tolerance monitoring
-        self.actor_failure_counts = defaultdict(int)
-        self.actor_restart_counts = defaultdict(int)
-
-    def _handle_actor_error(
-        self, error: ray.exceptions.RayActorError, actor_type: str
-    ) -> None:
-        """Handle actor death and restart scenarios"""
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        logger.warning(f"{actor_type} actor died: {error}")
-
-        # Track failure metrics
-        self.actor_failure_counts[actor_type] += 1
-
-        # Log metrics if logger is available
-        if hasattr(self, "logger") and self.logger is not None:
-            try:
-                metrics = {
-                    f"actor_failures/{actor_type}": 1,
-                    f"actor_failures/total": 1,
-                    f"actor_failures/{actor_type}_cumulative": self.actor_failure_counts[
-                        actor_type
-                    ],
-                }
-                self.logger.log(metrics, step=getattr(self, "global_step", 0))
-            except Exception as e:
-                logger.warning(f"Failed to log actor failure metrics: {e}")
-
-    def _safe_actor_call(
-        self, actor_method_ref, actor_type: str = "unknown", timeout: float = 300.0
-    ):
-        """Safely call actor method with error handling and timeout"""
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        try:
-            return ray.get(actor_method_ref, timeout=timeout)
-        except ray.exceptions.RayActorError as e:
-            self._handle_actor_error(e, actor_type)
-            raise
-        except ray.exceptions.GetTimeoutError as e:
-            logger.warning(f"Actor call timeout for {actor_type}: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error in actor call for {actor_type}: {e}")
-            raise
-
-    def _check_actor_health(self) -> dict[str, str]:
-        """Check health of all actors"""
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        health_status = {}
-
-        try:
-            # Check actor_rollout health
-            if hasattr(self, "actor_rollout_wg") and self.actor_rollout_wg is not None:
-                try:
-                    # Try a simple health check - accessing the worker group should work
-                    # If actors are healthy, this should not raise an exception
-                    world_size = self.actor_rollout_wg.world_size
-                    health_status["actor_rollout"] = "healthy"
-                except Exception as e:
-                    health_status["actor_rollout"] = f"unhealthy: {str(e)}"
-                    logger.warning(f"Actor rollout health check failed: {e}")
-
-            # Check critic health
-            if hasattr(self, "critic_wg") and self.critic_wg is not None:
-                try:
-                    world_size = self.critic_wg.world_size
-                    health_status["critic"] = "healthy"
-                except Exception as e:
-                    health_status["critic"] = f"unhealthy: {str(e)}"
-                    logger.warning(f"Critic health check failed: {e}")
-
-            # Check reference policy health
-            if hasattr(self, "ref_policy_wg") and self.ref_policy_wg is not None:
-                try:
-                    world_size = self.ref_policy_wg.world_size
-                    health_status["ref_policy"] = "healthy"
-                except Exception as e:
-                    health_status["ref_policy"] = f"unhealthy: {str(e)}"
-                    logger.warning(f"Reference policy health check failed: {e}")
-
-        except Exception as e:
-            logger.error(f"Error during actor health check: {e}")
-            health_status["health_check"] = f"error: {str(e)}"
-
-        return health_status
-
-    def _log_actor_restart(self, actor_type: str) -> None:
-        """Log actor restart events"""
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        self.actor_restart_counts[actor_type] += 1
-        logger.info(
-            f"Actor {actor_type} restarted (restart count: {self.actor_restart_counts[actor_type]})"
-        )
-
-        # Log metrics if logger is available
-        if hasattr(self, "logger") and self.logger is not None:
-            try:
-                metrics = {
-                    f"actor_restarts/{actor_type}": 1,
-                    f"actor_restarts/total": 1,
-                    f"actor_restarts/{actor_type}_cumulative": self.actor_restart_counts[
-                        actor_type
-                    ],
-                }
-                self.logger.log(metrics, step=getattr(self, "global_step", 0))
-            except Exception as e:
-                logger.warning(f"Failed to log actor restart metrics: {e}")
-
-    def _save_checkpoint(self) -> None:
-        # path: {save_checkpoint_path}/global_step_{global_step}/{actor,critic}
-        remove_obsolete_ckpt(
-            self.config.trainer.save_checkpoint_path,
-            self.global_step,
-            self.config.trainer.save_limit,
-        )
+    def _save_checkpoint(self):
+        """Save checkpoint to a specific location and potentially remove obsolete checkpoints"""
         folder_path = os.path.join(
             self.config.trainer.save_checkpoint_path, f"global_step_{self.global_step}"
         )
-        actor_path = os.path.join(folder_path, "actor")
-        self.actor_rollout_wg.save_checkpoint(actor_path)
+
+        # save workers
+        if self.hybrid_engine:
+            self.actor_rollout_wg.save_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
+        else:
+            self.policy_wg.save_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
 
         if self.use_critic:
-            critic_path = os.path.join(folder_path, "critic")
-            self.critic_wg.save_checkpoint(critic_path)
+            self.critic_wg.save_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
 
+        if self.use_reference_policy:
+            self.ref_policy_wg.save_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
+
+        if self.use_reward_model:
+            self.reward_model_wg.save_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
+
+        # save train_dataloader
         dataloader_path = os.path.join(folder_path, "dataloader.pt")
-        dataloader_state_dict = self.train_dataloader.state_dict()
-        torch.save(dataloader_state_dict, dataloader_path)
+        torch.save(self.train_dataloader.state_dict(), dataloader_path)
 
         # Save curriculum learning state if using curriculum strategy
-        if self.config.data.sampling_strategy == "curriculum" and hasattr(
-            self, "curriculum_sampler"
-        ):
-            curriculum_state = {
-                "curriculum_weights": self.train_dataset.curriculum_weights,
-                "sampler_state": self.curriculum_sampler.state_dict(),
-            }
-            curriculum_path = os.path.join(folder_path, "curriculum_state.pt")
-            torch.save(curriculum_state, curriculum_path)
+        if self.curriculum_manager is not None:
+            self.curriculum_manager.save_state(folder_path)
 
         last_global_step_path = os.path.join(
             self.config.trainer.save_checkpoint_path, CHECKPOINT_TRACKER
@@ -1570,18 +670,6 @@ class RayPPOTrainer:
         ckpt_list.sort(key=lambda x: int(x.split("global_step_")[-1]))
         return os.path.join(self.config.trainer.save_checkpoint_path, ckpt_list[-1])
 
-    def _load_curriculum_state(self) -> bool:
-        """Load curriculum state from checkpoint."""
-        if self.checkpoint_path is None:
-            return None
-
-        curriculum_path = os.path.join(self.checkpoint_path, "curriculum_state.pt")
-        if os.path.exists(curriculum_path):
-            curriculum_state = torch.load(curriculum_path, weights_only=False)
-            return curriculum_state
-        else:
-            return None
-
     def _load_dataloader_state(self) -> None:
         if self.checkpoint_path is None:
             return
@@ -1599,47 +687,38 @@ class RayPPOTrainer:
             self.checkpoint_path.strip(os.path.sep).split("global_step_")[-1]
         )
 
-        actor_path = os.path.join(self.checkpoint_path, "actor")
-        self.actor_rollout_wg.load_checkpoint(actor_path)
-        if self.use_critic:
-            critic_path = os.path.join(self.checkpoint_path, "critic")
-            self.critic_wg.load_checkpoint(critic_path)
+        # load workers
+        if self.hybrid_engine:
+            self.actor_rollout_wg.load_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
+        else:
+            self.policy_wg.load_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
 
-    def _balance_batch(
-        self,
-        batch: DataProto,
-        metrics: dict[str, Any],
-        logging_prefix: str = "global_seqlen",
-    ) -> None:
-        """Reorder the data on single controller such that each dp rank gets similar total tokens"""
-        attention_mask = batch.batch["attention_mask"]
-        batch_size = attention_mask.shape[0]
-        global_seqlen_lst = (
-            batch.batch["attention_mask"].view(batch_size, -1).sum(-1).tolist()
-        )  # (train_batch_size,)
-        world_size = self.actor_rollout_wg.world_size
-        global_partition_lst = get_seqlen_balanced_partitions(
-            global_seqlen_lst, k_partitions=world_size, equal_size=True
-        )
-        # reorder based on index. The data will be automatically equally partitioned by dispatch function
-        global_idx = torch.tensor(
-            [j for partition in global_partition_lst for j in partition]
-        )
-        batch.reorder(global_idx)
-        global_balance_stats = log_seqlen_unbalance(
-            seqlen_list=global_seqlen_lst,
-            partitions=global_partition_lst,
-            prefix=logging_prefix,
-        )
-        metrics.update(global_balance_stats)
+        if self.use_critic:
+            self.critic_wg.load_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
+
+        if self.use_reference_policy:
+            self.ref_policy_wg.load_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
+
+        if self.use_reward_model:
+            self.reward_model_wg.load_checkpoint(
+                tag=f"global_step_{self.global_step}",
+                path=self.config.trainer.save_checkpoint_path,
+            )
 
     def fit(self):
-        """
-        The training loop of PPO.
-        The driver process only need to call the compute functions of the worker group through RPC to construct the PPO dataflow.
-        The light-weight advantage computation is done on the driver process.
-        """
-        # breakpoint()
+        """Main training loop with mixed PPO steps."""
         val_metrics: dict[str, Any] | None = None
 
         # perform validation before training
@@ -1653,8 +732,8 @@ class RayPPOTrainer:
             range(self.config.trainer.total_episodes), desc="Episode", position=0
         ):
             # Reset cached indices to ensure new indices are generated with the correct random position
-            if self.config.data.sampling_strategy == "curriculum":
-                self.curriculum_sampler.cached_mixed_indices = None
+            if self.curriculum_manager is not None:
+                self.curriculum_manager.reset_cached_indices()
 
             # Create a new iterator for each epoch
             self.dataloader_iterator = iter(self.train_dataloader)
@@ -1736,208 +815,116 @@ class RayPPOTrainer:
                             reward_tensor, reward_metrics = self.reward_fn(batch)
                             batch.batch["token_level_scores"] = reward_tensor
                             reward_metrics = {
-                                f"reward/{key}": value
-                                for key, value in reduce_metrics(reward_metrics).items()
+                                f"reward/{k}": v for k, v in reward_metrics.items()
                             }
-                            metrics.update(reward_metrics)
 
-                        # balance the number of valid tokens on each dp rank.
-                        # Note that this breaks the order of data inside the batch.
-                        # Please take care when you implement group based adv computation such as GRPO and rloo
-                        self._balance_batch(batch, metrics=metrics)
+                        # Compute KL divergence
+                        with _timer("ref_log_probs", timing_raw):
+                            if self.use_reference_policy:
+                                ref_log_probs, ref_output = (
+                                    self.ref_policy_wg.compute_log_probs(batch)
+                                )
+                                # Update batch - actor will need to recalculate if HybridEngine
+                                batch.batch["ref_log_probs"] = ref_log_probs
 
-                        # compute global_valid tokens
-                        batch.meta_info["global_token_num"] = torch.sum(
-                            batch.batch["attention_mask"], dim=-1
-                        ).tolist()
+                        # compute values if use critic, otherwise heuristics are used
+                        with _timer("values", timing_raw):
+                            if self.use_critic:
+                                values, value_output = self.critic_wg.compute_values(batch)
+                                batch.batch["values"] = values
 
-                        # recompute old_log_probs
-                        with _timer("old", timing_raw):
-                            old_log_probs = self.actor_rollout_wg.compute_log_probs(
-                                batch
+                        # Update actors
+                        with _timer("update_actor", timing_raw):
+                            kl_result = {"kl_ctl/value": self.kl_ctrl.value}
+                            actor_output, batch_with_generate_data, non_tensor_dict = (
+                                self.actor_rollout_wg.update_actor(
+                                    batch, self.kl_ctrl, **kl_result
+                                )
                             )
-                            batch = batch.union(old_log_probs)
+                            actor_metrics = reduce_micro_batch_metrics(
+                                actor_output.metrics
+                            )
 
-                        # compute ref_log_probs
+                        # update KL controller
                         if self.use_reference_policy:
-                            with _timer("ref", timing_raw):
-                                ref_log_probs = (
-                                    self.ref_policy_wg.compute_ref_log_probs(batch)
-                                )
-                                batch = batch.union(ref_log_probs)
-
-                        # compute values
-                        if self.use_critic:
-                            with _timer("values", timing_raw):
-                                values = self.critic_wg.compute_values(batch)
-                                batch = batch.union(values)
-
-                        with _timer("adv", timing_raw):
-                            # apply kl penalty if available
-                            if (
-                                not self.config.algorithm.use_kl_loss
-                                and self.use_reference_policy
-                            ):  # apply kl penalty to reward
-                                batch, kl_metrics = apply_kl_penalty(
-                                    batch,
-                                    kl_ctrl=self.kl_ctrl,
-                                    kl_penalty=self.config.algorithm.kl_penalty,
-                                )
-                                metrics.update(kl_metrics)
-                            else:
-                                batch.batch["token_level_rewards"] = batch.batch[
-                                    "token_level_scores"
-                                ]
-
-                            # compute advantages, executed on the driver process
-                            batch = compute_advantage(
-                                batch,
-                                adv_estimator=self.config.algorithm.adv_estimator,
-                                gamma=self.config.algorithm.gamma,
-                                lam=self.config.algorithm.lam,
-                            )
+                            kl_mean = actor_metrics["rl/kl_mean"]
+                            self.kl_ctrl.update(kl_mean)
+                            kl_result["kl_ctl/value_updated"] = self.kl_ctrl.value
 
                         # update critic
-                        if self.use_critic:
-                            with _timer("update_critic", timing_raw):
+                        with _timer("update_critic", timing_raw):
+                            if self.use_critic:
                                 critic_output = self.critic_wg.update_critic(batch)
+                                critic_metrics = reduce_micro_batch_metrics(
+                                    critic_output.metrics
+                                )
 
-                            critic_metrics = reduce_metrics(
-                                critic_output.non_tensor_batch
+                        # Update curriculum weights if configured for step-level updates
+                        if (
+                            self.curriculum_manager is not None
+                            and self.curriculum_manager.should_update_weights(self.global_step)
+                        ):
+                            with _timer("update_curriculum", timing_raw):
+                                self.curriculum_manager.update_weights(self.global_step)
+
+                                # Log curriculum learning metrics
+                                curriculum_metrics = self.curriculum_manager.get_metrics()
+                                metrics.update(curriculum_metrics)
+
+                        # logging
+                        metrics.update(timing_raw)
+                        metrics.update(actor_metrics)
+                        metrics.update(critic_metrics) if self.use_critic else None
+                        metrics.update(kl_result)
+                        metrics.update(reward_metrics)
+
+                        # save to storage
+                        if (
+                            self.config.trainer.save_freq > 0
+                            and self.global_step % self.config.trainer.save_freq == 0
+                        ):
+                            self._save_checkpoint()
+                            remove_obsolete_ckpt(
+                                self.config.trainer.save_checkpoint_path,
+                                self.config.trainer.max_save,
                             )
-                            metrics.update(critic_metrics)
 
-                        # update actor
-                        if self.config.trainer.critic_warmup <= self.global_step:
-                            with _timer("update_actor", timing_raw):
-                                actor_output = self.actor_rollout_wg.update_actor(batch)
-
-                            actor_metrics = reduce_metrics(
-                                actor_output.non_tensor_batch
-                            )
-                            metrics.update(actor_metrics)
-
-                        # validate
+                        # remote validation
                         if (
                             self.val_reward_fn is not None
                             and self.config.trainer.val_freq > 0
                             and self.global_step % self.config.trainer.val_freq == 0
                         ):
-                            with _timer("validation", timing_raw):
-                                val_metrics = self._validate()
-
+                            val_metrics = self._validate()
                             metrics.update(val_metrics)
 
-                        if (
-                            self.config.trainer.save_freq > 0
-                            and self.global_step % self.config.trainer.save_freq == 0
-                        ):
-                            with _timer("save_checkpoint", timing_raw):
-                                self._save_checkpoint()
+                        # Logging
+                        self.logger.log(data=metrics, step=self.global_step)
 
-                        # Update curriculum weights if configured for step-level updates
-                        if (
-                            self.config.data.sampling_strategy == "curriculum"
-                            and self.config.data.curriculum_update_freq > 0
-                            and self.global_step
-                            % self.config.data.curriculum_update_freq
-                            == 0
-                        ):
-                            with _timer("update_curriculum", timing_raw):
-                                # Update Curriculum Weights to self.train_dataset.curriculum_weights
-                                self._update_curriculum_weights()
-
-                                # Replace Internal Sampler of Curriculum Sampler with the new weights
-                                self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
-
-                                # Refresh Dataloader Iterator
-                                self.dataloader_iterator = iter(self.train_dataloader)
-
-                                # Log curriculum learning metrics
-                                curriculum_metrics = {
-                                    "curriculum/mean_weight": self.train_dataset.curriculum_weights.mean().item(),
-                                    "curriculum/std_weight": self.train_dataset.curriculum_weights.std().item(),
-                                    "curriculum/min_weight": self.train_dataset.curriculum_weights.min().item(),
-                                    "curriculum/max_weight": self.train_dataset.curriculum_weights.max().item(),
-                                    "curriculum/consumed_batches": self.curriculum_sampler.consumed_batches,
-                                    "curriculum/random_position": self.curriculum_sampler.get_training_random_position(),
-                                }
-                                metrics.update(curriculum_metrics)
-
-                    # collect metrics
-                    n_gpus = self.resource_pool_manager.get_n_gpus()
-                    metrics.update(
-                        compute_data_metrics(batch=batch, use_critic=self.use_critic)
-                    )
-                    metrics.update(
-                        compute_timing_metrics(batch=batch, timing_raw=timing_raw)
-                    )
-                    metrics.update(
-                        compute_throughout_metrics(
-                            batch=batch, timing_raw=timing_raw, n_gpus=n_gpus
-                        )
-                    )
-
-                    self.logger.log(data=metrics, step=self.global_step)
-
-                    # Periodic health monitoring
-                    if (
-                        self.config.fault_tolerance.enable_health_monitoring
-                        and self.config.fault_tolerance.health_check_interval > 0
-                        and self.global_step
-                        % max(1, int(self.config.fault_tolerance.health_check_interval))
-                        == 0
-                    ):
-                        health_status = self._check_actor_health()
-                        health_metrics = {
-                            f"actor_health/{actor_type}": (
-                                1 if status == "healthy" else 0
-                            )
-                            for actor_type, status in health_status.items()
-                            if not status.startswith("error")
-                        }
-                        if health_metrics:
-                            self.logger.log(data=health_metrics, step=self.global_step)
-
-                    # Update the random indices position to properly track the samples seen
-                    if self.config.data.sampling_strategy == "curriculum":
-                        self.curriculum_sampler.update_position_after_batch()
+                    if self.curriculum_manager is not None:
+                        self.curriculum_manager.update_position_after_batch()
 
                 except StopIteration:
-                    # We've reached the end of the current iterator
+                    # If we've consumed all batches for this epoch, break to start new epoch
                     break
 
-            # Exit the epoch loop if we've exceeded training steps
+            # Check if we've exceeded max steps
             if self.global_step > self.training_steps:
                 break
 
             # Update curriculum weights at the end of each epoch if configured for epoch-level updates
             if (
-                self.config.data.sampling_strategy == "curriculum"
-                and self.config.data.curriculum_update_freq == 0
+                self.curriculum_manager is not None
+                and self.curriculum_manager.should_update_weights_epoch()
             ):
                 with _timer("update_curriculum", timing_raw):
-                    # Update Curriculum Weights to self.train_dataset.curriculum_weights
-                    self._update_curriculum_weights()
-
-                    # Replace Internal Sampler of Curriculum Sampler with the new weights
-                    self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
-
-                    # Refresh Dataloader Iterator
-                    self.dataloader_iterator = iter(self.train_dataloader)
+                    self.curriculum_manager.update_weights(self.global_step)
 
                     # Log curriculum learning metrics
-                    curriculum_metrics = {
-                        "curriculum/mean_weight": self.train_dataset.curriculum_weights.mean().item(),
-                        "curriculum/std_weight": self.train_dataset.curriculum_weights.std().item(),
-                        "curriculum/min_weight": self.train_dataset.curriculum_weights.min().item(),
-                        "curriculum/max_weight": self.train_dataset.curriculum_weights.max().item(),
-                        "curriculum/consumed_batches": self.curriculum_sampler.consumed_batches,
-                        "curriculum/random_position": self.curriculum_sampler.get_training_random_position(),
-                    }
+                    curriculum_metrics = self.curriculum_manager.get_metrics()
                     self.logger.log(data=curriculum_metrics, step=self.global_step)
 
-        # perform validation after training
+        # perform validation after training if not already done
         if self.val_reward_fn is not None:
             if (
                 val_metrics is None
@@ -1952,3 +939,26 @@ class RayPPOTrainer:
             or self.global_step % self.config.trainer.save_freq != 0
         ):
             self._save_checkpoint()
+
+
+def reduce_metrics(all_metrics: Dict[str, List[torch.Tensor]]) -> Dict[str, Any]:
+    """
+    average over a list of 1-d tensors/lists
+    """
+    reduced_metrics = {}
+    for key, value in all_metrics.items():
+        value = torch.tensor(value, dtype=torch.float32)
+        reduced_metrics[key] = value.mean().item()
+    return reduced_metrics
+
+
+def reduce_micro_batch_metrics(raw_metrics):
+    metrics = defaultdict(list)
+    for raw_metric in raw_metrics:
+        for key, value in raw_metric.items():
+            if isinstance(value, torch.Tensor):
+                metrics[key].append(value.mean().item())
+            else:
+                metrics[key].append(value)
+    metrics = {key: np.mean(value) for key, value in metrics.items()}
+    return metrics
