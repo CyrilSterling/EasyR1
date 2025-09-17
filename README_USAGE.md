@@ -4,12 +4,8 @@ This guide provides comprehensive instructions for launching RLHF training with 
 
 ## Prerequisites
 
-1. **Virtual Environment Setup**
+1. **Installation**
 ```bash
-# Create and activate virtual environment
-python -m venv .venv
-source .venv/bin/activate
-
 # Install dependencies
 pip install -r requirements.txt
 ```
@@ -19,7 +15,6 @@ Create a `.env` file in the project root (optional):
 ```bash
 # .env
 MODEL_PATH=/path/to/default/model
-HF_ENDPOINT=https://hf-mirror.com  # Optional: for Hugging Face mirror
 ```
 
 ## Training Strategies
