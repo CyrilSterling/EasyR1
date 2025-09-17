@@ -1,172 +1,211 @@
-# EasyR1: An Efficient, Scalable, Multi-Modality RL Training Framework
+# EasyR1 Curriculum Learning Guide
 
-[![GitHub Repo stars](https://img.shields.io/github/stars/hiyouga/EasyR1)](https://github.com/hiyouga/EasyR1/stargazers)
-[![Twitter](https://img.shields.io/twitter/follow/llamafactory_ai)](https://twitter.com/llamafactory_ai)
+This guide provides comprehensive instructions for using curriculum learning strategies in EasyR1, including advanced sampling techniques for RLHF training.
 
-This project is a clean fork of the original [veRL](https://github.com/volcengine/verl) project to support vision language models, we thank all the authors for providing such a high-performance RL training framework.
+## Overview
 
-EasyR1 is efficient and scalable due to the design of **[HybirdEngine](https://arxiv.org/abs/2409.19256)** and the latest release of **[vLLM](https://github.com/vllm-project/vllm)**'s SPMD mode.
+EasyR1 supports three main sampling strategies for training:
 
-## Features
+- **Shuffle**: Random sampling from the dataset
+- **Sequential**: Process samples in order
+- **Curriculum**: Dynamic sample weighting based on difficulty metrics
 
-- Supported models
-  - Llama3/Qwen2/Qwen2.5 language models
-  - Qwen2/Qwen2.5-VL vision language models
-  - DeepSeek-R1 distill models
+## Quick Start
 
-- Supported algorithms
-  - GRPO
-  - Reinforce++
-  - ReMax
-  - RLOO
-
-- Supported datasets
-  - Any text, vision-text dataset in a [specific format](#custom-dataset)
-
-- Supported tricks
-  - Padding-free training
-  - Resuming from checkpoint
-  - Wandb & SwanLab & Mlflow & Tensorboard tracking
-  - Ray actor fault tolerance for production deployments
-
-## Requirements
-
-### Software Requirements
-
-- Python 3.9+
-- transformers>=4.49.0
-- flash-attn>=2.4.3
-- vllm>=0.7.3
-
-We provide a [Dockerfile](./Dockerfile) to easily build environments.
-
-We recommend using the [pre-built docker image](https://hub.docker.com/r/hiyouga/verl) in EasyR1.
+### Basic Training with Shuffle Strategy
 
 ```bash
-# stable
-docker pull hiyouga/verl:ngc-th2.5.1-cu120-vllm0.7.4-hotfix
-# nightly
-docker pull hiyouga/verl:ngc-th2.6.0-cu120-vllm0.8.2
+JOB_NAME=my_training \
+MODEL_PATH=Qwen/Qwen2.5-VL-3B-Instruct \
+bash examples/mmr1/train_qwen2_5_vl_3b.sh \
+    data.train_files=/path/to/training/data \
+    data.sampling_strategy=shuffle \
+    trainer.total_episodes=10
 ```
 
-### Hardware Requirements
-
-\* *estimated*
-
-| Method                   | Bits |  1.5B  |   3B   |   7B   |   32B   |
-| ------------------------ | ---- | ------ | ------ | ------ | ------- |
-| GRPO Full Fine-Tuning    |  AMP | 2*24GB | 4*40GB | 8*40GB | 16*80GB |
-| GRPO Full Fine-Tuning    | BF16 | 1*24GB | 1*40GB | 4*40GB |  8*80GB |
-
-> [!NOTE]
-> Use `worker.actor.fsdp.torch_dtype=bf16` and `worker.actor.optim.strategy=adamw_bf16` to enable bf16 training.
->
-> We are working hard to reduce the VRAM in RL training, LoRA support will be integrated in next updates.
-
-## Tutorial: Run Qwen2.5-VL GRPO on [Geometry3K](https://huggingface.co/datasets/hiyouga/geometry3k) Dataset in Just 3 Steps
-
-![image](assets/qwen2_5_vl_7b_geo.png)
-
-### Installation
+### Curriculum Learning with Learnability Metric
 
 ```bash
-git clone https://github.com/hiyouga/EasyR1.git
-cd EasyR1
-pip install -e .
+JOB_NAME=curriculum_training \
+MODEL_PATH=Qwen/Qwen2.5-VL-3B-Instruct \
+bash examples/mmr1/train_qwen2_5_vl_3b.sh \
+    data.train_files=/path/to/training/data \
+    data.sampling_strategy=curriculum \
+    'data.curriculum_metrics=[learnability]' \
+    'data.curriculum_metric_weights=[1.0]' \
+    data.curriculum_mixture_ratio=0.5 \
+    trainer.total_episodes=10
 ```
 
-### GRPO Training
+## Curriculum Learning Features
+
+### Available Metrics
+
+- **learnability**: Measures sample difficulty based on model performance
+- **distinct**: N-gram diversity in generated responses
+- **self-bleu**: Similarity between generated responses
+- **edit-distance**: Pairwise edit distance between responses
+
+### Key Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `curriculum_metrics` | List of metrics for weighting | `[learnability]` |
+| `curriculum_metric_weights` | Weights for combining metrics | `[1.0]` |
+| `curriculum_mixture_ratio` | Ratio of weighted vs random sampling (0.0-1.0) | `0.5` |
+| `curriculum_update_freq` | Update weights every N steps (0 for epoch-level) | `4` |
+| `curriculum_rollout_n` | Number of rollouts for metric calculation | `8` |
+| `curriculum_momentum` | Momentum for weight updates | `0.0` |
+
+## Advanced Examples
+
+### Multi-Metric Curriculum Learning
+
+Combine learnability and diversity metrics:
 
 ```bash
-bash examples/qwen2_5_vl_7b_geo3k_grpo.sh
+JOB_NAME=advanced_curriculum \
+MODEL_PATH=Qwen/Qwen2.5-VL-3B-Instruct \
+bash examples/mmr1/train_qwen2_5_vl_3b.sh \
+    data.train_files=/path/to/data \
+    data.sampling_strategy=curriculum \
+    'data.curriculum_metrics=[learnability,self-bleu]' \
+    'data.curriculum_metric_weights=[0.8,0.2]' \
+    data.curriculum_mixture_ratio=0.8 \
+    data.curriculum_update_freq=8 \
+    trainer.total_episodes=10
 ```
 
-### Merge Checkpoint in Hugging Face Format
+### Production Training Configuration
 
 ```bash
-python3 scripts/model_merger.py --local_dir checkpoints/easy_r1/exp_name/global_step_1/actor
+JOB_NAME=production_v1 \
+MODEL_PATH=Qwen/Qwen2.5-VL-7B-Instruct \
+bash examples/mmr1/train_qwen2_5_vl_3b.sh \
+    data.train_files=/data/large_dataset \
+    data.max_response_length=4096 \
+    data.sampling_strategy=curriculum \
+    'data.curriculum_metrics=[learnability,distinct,self-bleu]' \
+    'data.curriculum_metric_weights=[0.6,0.2,0.2]' \
+    data.curriculum_mixture_ratio=0.7 \
+    data.curriculum_update_freq=10 \
+    data.curriculum_rollout_n=16 \
+    trainer.total_episodes=20 \
+    trainer.nnodes=4 \
+    trainer.n_gpus_per_node=8 \
+    worker.rollout.n=32 \
+    worker.actor.global_batch_size=512
 ```
 
-> [!TIP]
-> If you encounter issues with connecting to Hugging Face, consider using `export HF_ENDPOINT=https://hf-mirror.com`.
->
-> If you want to use SwanLab logger, consider using `bash examples/qwen2_5_vl_7b_geo3k_swanlab.sh`.
+## Configuration via YAML
 
-## Custom Dataset
+Create a custom configuration file:
 
-Please refer to the example datasets to prepare your own dataset.
+```yaml
+# custom_curriculum.yaml
+defaults:
+  - mmr1_b200
 
-- Text dataset: https://huggingface.co/datasets/hiyouga/math12k
-- Vision-text dataset: https://huggingface.co/datasets/hiyouga/geometry3k
+data:
+  sampling_strategy: curriculum
+  curriculum_metrics:
+    - learnability
+    - self-bleu
+  curriculum_metric_weights:
+    - 0.7
+    - 0.3
+  curriculum_mixture_ratio: 0.6
+  curriculum_update_freq: 10
+  curriculum_rollout_n: 12
+```
 
-> [!TIP]
-> EasyR1 already supports multi-image dataset.
+Use with:
 
-## How to Understand GRPO in EasyR1
+```bash
+python -m verl.trainer.main config=custom_curriculum.yaml
+```
 
-![image](assets/easyr1_grpo.png)
+## Mixture Ratio Guidelines
 
-- To learn about the GRPO algorithm, you can refer to [Hugging Face's blog](https://huggingface.co/docs/trl/v0.15.2/en/grpo_trainer).
+The `curriculum_mixture_ratio` controls the balance between weighted and random sampling:
 
-## How to Run 70B+ Model in Multi-node Environment
+| Ratio | Effect | Use Case |
+|-------|--------|----------|
+| 0.0 | Fully random | Equivalent to shuffle strategy |
+| 0.2 | 20% weighted, 80% random | Light curriculum influence |
+| 0.5 | Balanced | Good starting point |
+| 0.8 | 80% weighted, 20% random | Strong curriculum focus |
+| 1.0 | Fully weighted | Pure curriculum learning |
 
-Please see the **[veRL's official doc](https://verl.readthedocs.io/en/latest/start/multinode.html)** for multi-node training and Ray debugger.
+## Update Frequency Strategies
 
-## Other Baselines
+| Setting | Behavior | Best For |
+|---------|----------|----------|
+| 0 | Epoch-level updates | Small datasets |
+| 4 | Every 4 steps | Balanced approach |
+| 8-10 | Less frequent | Large datasets |
+| 20+ | Infrequent | Stable training |
 
-We also reproduced the following two baselines of the [R1-V](https://github.com/deep-agent/R1-V) project.
-- [CLEVR-70k-Counting](examples/baselines/qwen2_5_vl_3b_clevr.sh): Train the Qwen2.5-VL-3B-Instruct model on counting problem.
-- [GeoQA-8k](examples/baselines/qwen2_5_vl_3b_geoqa8k.sh): Train the Qwen2.5-VL-3B-Instruct model on GeoQA problem.
+## Performance Tips
 
-## Awesome Work using EasyR1
+### For Small Datasets (<10K samples)
+- Use `curriculum_update_freq=0` for epoch-level updates
+- Lower `curriculum_rollout_n` to 4-8
+- Consider higher `curriculum_momentum` (0.5-0.9)
 
-- **MMR1**: Advancing the Frontiers of Multimodal Reasoning. [![[code]](https://img.shields.io/github/stars/LengSicong/MMR1)](https://github.com/LengSicong/MMR1)
-- **Vision-R1**: Incentivizing Reasoning Capability in Multimodal Large Language Models. [![[code]](https://img.shields.io/github/stars/Osilly/Vision-R1)](https://github.com/Osilly/Vision-R1) [![[arxiv]](https://img.shields.io/badge/arxiv-2503.06749-blue)](https://arxiv.org/abs/2503.06749)
-- **Seg-Zero**: Reasoning-Chain Guided Segmentation via Cognitive Reinforcement. [![[code]](https://img.shields.io/github/stars/dvlab-research/Seg-Zero)](https://github.com/dvlab-research/Seg-Zero) [![[arxiv]](https://img.shields.io/badge/arxiv-2503.06520-blue)](https://arxiv.org/abs/2503.06520)
-- **MetaSpatial**: Reinforcing 3D Spatial Reasoning in VLMs for the Metaverse. [![[code]](https://img.shields.io/github/stars/PzySeere/MetaSpatial)](https://github.com/PzySeere/MetaSpatial) [![[arxiv]](https://img.shields.io/badge/arxiv-2503.18470-blue)](https://arxiv.org/abs/2503.18470)
-- **Temporal-R1**: Envolving Temporal Reasoning Capability into LMMs via Temporal Consistent Reward
- [![[code]](https://img.shields.io/github/stars/appletea233/Temporal-R1)](https://github.com/appletea233/Temporal-R1)
-## TODO
+### For Large Models (>30B parameters)
+- Reduce `curriculum_rollout_batch_size` to manage memory
+- Use fewer curriculum metrics to reduce computation
+- Consider `curriculum_update_freq=20+` for stability
 
-- Support LoRA (high priority).
-- Support ulysses parallelism for VLMs (middle priority).
-- Support more VLM architectures.
+### For Quick Experimentation
+- Start with single metric: `'data.curriculum_metrics=[learnability]'`
+- Use `curriculum_mixture_ratio=0.5` as baseline
+- Set `curriculum_rollout_n=4` for faster iteration
 
-> [!NOTE]
-> We will not provide scripts for supervised fine-tuning and inference in this project. If you have such requirements, we recommend using [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory).
+## Monitoring Curriculum Learning
 
-### Known bugs
+Track these metrics in wandb/tensorboard:
+- `curriculum/mean_weight`: Average sample weight
+- `curriculum/std_weight`: Weight distribution spread
+- `curriculum/min_weight`, `curriculum/max_weight`: Weight range
+- `curriculum/consumed_batches`: Training progress
+- `curriculum/random_position`: Mix of weighted vs random samples
 
-These features are temporarily disabled for now, we plan to fix them one-by-one in the future updates.
+## Resume from Checkpoint
 
-- Vision language models are not compatible with ulysses parallelism yet.
+Curriculum weights and sampler state are automatically saved:
 
-## Discussion Group
+```bash
+trainer.load_checkpoint_path=/checkpoints/previous_run/global_step_100 \
+trainer.save_checkpoint_path=/checkpoints/continued_run
+```
 
-👋 Join our [WeChat group](assets/wechat.jpg).
+## Troubleshooting
+
+### Issue: Weights not updating
+- Check `curriculum_update_freq` is set appropriately
+- Verify metrics are being calculated (check logs)
+- Ensure `curriculum_rollout_batch_size` is reasonable
+
+### Issue: Training instability
+- Reduce `curriculum_mixture_ratio` for more randomness
+- Increase `curriculum_momentum` for smoother updates
+- Use fewer or simpler metrics
+
+### Issue: Slow metric computation
+- Reduce `curriculum_rollout_n`
+- Increase `curriculum_rollout_batch_size`
+- Use fewer metrics or simpler metrics (e.g., just learnability)
 
 ## Citation
 
-Core contributors: [Yaowei Zheng](https://github.com/hiyouga), [Junting Lu](https://github.com/AL-377), [Shenzhi Wang](https://github.com/Shenzhi-Wang), [Zhangchi Feng](https://github.com/BUAADreamer), [Dongdong Kuang](https://github.com/Kuangdd01) and Yuwen Xiong
-
-We also thank Guangming Sheng and Chi Zhang for helpful discussions.
+If you use curriculum learning in EasyR1, please cite:
 
 ```bibtex
-@misc{zheng2025easyr1,
-  title        = {EasyR1: An Efficient, Scalable, Multi-Modality RL Training Framework},
-  author       = {Yaowei Zheng, Junting Lu, Shenzhi Wang, Zhangchi Feng, Dongdong Kuang, Yuwen Xiong},
-  howpublished = {\url{https://github.com/hiyouga/EasyR1}},
-  year         = {2025}
-}
-```
-
-We recommend to also cite the original work.
-
-```bibtex
-@article{sheng2024hybridflow,
-  title   = {HybridFlow: A Flexible and Efficient RLHF Framework},
-  author  = {Guangming Sheng and Chi Zhang and Zilingfeng Ye and Xibin Wu and Wang Zhang and Ru Zhang and Yanghua Peng and Haibin Lin and Chuan Wu},
-  year    = {2024},
-  journal = {arXiv preprint arXiv: 2409.19256}
+@software{easyr1_curriculum,
+  title={EasyR1: Scalable RLHF with Curriculum Learning},
+  year={2024},
+  publisher={ByteDance},
 }
 ```
