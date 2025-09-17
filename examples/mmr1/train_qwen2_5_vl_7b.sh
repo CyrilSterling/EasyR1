@@ -12,7 +12,7 @@ else
 fi
 
 # Fallback for model path
-MODEL_PATH=Qwen/Qwen2.5-VL-3B-Instruct
+MODEL_PATH=Qwen/Qwen2.5-VL-7B-Instruct
 echo "Using model path: $MODEL_PATH"
 
 # Sanity check
