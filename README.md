@@ -1,6 +1,6 @@
-# EasyR1 Curriculum Learning Guide
+# MMR1 Curriculum Learning
 
-This guide provides comprehensive instructions for using curriculum learning strategies in EasyR1, including advanced sampling techniques for RLHF training.
+This guide provides comprehensive instructions for reproduce curriculum learning strategies in MMR1, including advanced sampling techniques for RLHF training.
 
 ## Overview
 
