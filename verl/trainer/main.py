@@ -21,9 +21,6 @@ import torch
 import numpy as np
 import random
 
-
-print(f"sys.executable: {sys.executable}")
-
 import ray
 from omegaconf import OmegaConf
 
@@ -42,9 +39,8 @@ class Runner:
     """A runner for RL training."""
 
     def run(self, config: PPOConfig):
-        # print config
+        # Initialize config
         config.deep_post_init()
-        print(json.dumps(config.to_dict(), indent=2))
 
         # instantiate tokenizer
         tokenizer = get_tokenizer(
@@ -143,14 +139,7 @@ class Runner:
 
 
 import sys
-
-
-print(f"Python Executable: {sys.executable}")
 import verl
-
-
-print(f"verl __file__: {verl.__file__}")
-print(f"verl.__version__: {verl.__version__}")
 
 
 def main():
@@ -164,7 +153,6 @@ def main():
 
     ppo_config = OmegaConf.merge(default_config, cli_args)
     ppo_config = OmegaConf.to_object(ppo_config)
-    print(ppo_config)
 
     if not ray.is_initialized():
         # this is for local ray cluster

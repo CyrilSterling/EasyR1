@@ -91,7 +91,6 @@ class CustomRewardManager:
             raise NotImplementedError()
 
     def __call__(self, data: DataProto) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        # breakpoint()
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_metrics = defaultdict(list)
 
@@ -137,7 +136,6 @@ class CustomRewardManager:
         reward_tensor: torch.Tensor,
         reward_metrics: Dict[str, float],
     ):
-        # breakpoint()
         prompt_strs = []
         response_strs = []
         ground_truths = []

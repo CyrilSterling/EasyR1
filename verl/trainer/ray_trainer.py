@@ -383,9 +383,6 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
             # Synchronize the position counter with the actual training position
             # This ensures we continue from where training left off rather than restarting
             self.random_indices_position = self.get_training_random_position()
-            print(
-                f"Starting index generation with random_indices_position: {self.random_indices_position}"
-            )
 
             for batch_idx in range(num_batches):
                 # Calculate start indices for weighted part
@@ -480,7 +477,7 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
             try:
                 self.generator.set_state(state_dict["generator_state"])
             except Exception as e:
-                print(f"Warning: Could not restore generator state: {e}")
+                pass  # Ignore generator state restoration failures
 
         # Update the weighted sampler with restored weights
         self.weighted_sampler = WeightedRandomSampler(
@@ -493,10 +490,6 @@ class MixedCurriculumSampler(torch.utils.data.Sampler):
         # Reset cached indices to force regeneration with restored state
         self.cached_mixed_indices = None
 
-        print(
-            f"Restored curriculum sampler state: consumed_batches={self.consumed_batches}, "
-            f"random_indices_position={self.random_indices_position}"
-        )
 
 
 def pad_list(lst: list, divisor: int):
@@ -625,15 +618,7 @@ def calculate_learnability_metric_with_batch_data(
     batch_size: int,
     curriculum_rollout_n: int,
 ):
-    """Remote task for calculating learnability metric with pre-extracted batch data.
-    
-    Args:
-        reward_fn: Can be either CustomRewardManager object or ray.ObjectRef to it
-        batch_data: Pre-extracted batch data dictionary
-        gen_batch_output: Generated batch output
-        batch_size: Size of the batch
-        curriculum_rollout_n: Number of curriculum rollouts
-    """
+    """Remote task for calculating learnability metric with pre-extracted batch data."""
     batch = DataProto.from_single_dict(batch_data)
 
     if "multi_modal_inputs" in batch.non_tensor_batch.keys():
@@ -675,17 +660,17 @@ def calculate_single_distinct_n(shared_data_ref, start_idx: int, end_idx: int, n
 def calculate_distinct_n_metric(responses, batch_size, curriculum_rollout_n, n=3):
     """Remote task for calculating distinct-n metric with optimized centralized serialization."""
     tokenized_sequences = responses.tolist()
-    
-    # 1. 数据预处理和共享 - 一次序列化，多次使用
+
+    # Share data once for all tasks - single serialization for multiple uses
     shared_data_ref = ray.put(tokenized_sequences)
-    
-    # 2. 批量任务参数准备
+
+    # Prepare batch task parameters
     task_params = [
         (shared_data_ref, i * curriculum_rollout_n, (i + 1) * curriculum_rollout_n, n)
         for i in range(batch_size)
     ]
-    
-    # 3. 分块批量提交（避免调度器过载）
+
+    # Submit in chunks to avoid scheduler overload
     chunk_size = min(100, batch_size)
     all_futures = []
     
@@ -705,24 +690,24 @@ def calculate_distinct_n_metric(responses, batch_size, curriculum_rollout_n, n=3
 def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
     """Remote task for calculating self-BLEU-123 metric using optimized Ray tasks."""
     tokenized_sequences = responses.tolist()
-    
-    # 1. 数据预处理和共享 - 一次序列化，多次使用
+
+    # Share data once for all tasks - single serialization for multiple uses
     shared_data_ref = ray.put(tokenized_sequences)
 
-    # 2. 批量任务参数准备
+    # Prepare batch task parameters
     task_params = [
         (shared_data_ref, i * curriculum_rollout_n, (i + 1) * curriculum_rollout_n)
         for i in range(batch_size)
     ]
-    
-    # 3. 分块批量提交（避免调度器过载）
-    chunk_size = min(8, batch_size)  # 动态调整chunk大小
+
+    # Submit in chunks to avoid scheduler overload
+    chunk_size = min(8, batch_size)  # Dynamically adjust chunk size
     all_futures = []
     
     for i in range(0, len(task_params), chunk_size):
         chunk = task_params[i:i+chunk_size]
         
-        # 批量创建这个chunk的任务
+        # Create tasks for this chunk in batch
         chunk_futures = [
             calculate_single_bleu_score.remote(data_ref, start_idx, end_idx)
             for data_ref, start_idx, end_idx in chunk
@@ -730,7 +715,7 @@ def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
         
         all_futures.extend(chunk_futures)
     
-    # 4. 批量收集结果
+    # Collect all results in batch
     bleu_scores = ray.get(all_futures)
     return torch.tensor(bleu_scores, dtype=torch.float32)
 
@@ -739,24 +724,24 @@ def calculate_self_bleu_metric(responses, batch_size, curriculum_rollout_n):
 def calculate_edit_distance_metric(responses, batch_size, curriculum_rollout_n):
     """Remote task for calculating edit distance metric using optimized Ray tasks."""
     tokenized_sequences = responses.tolist()
-    
-    # 1. 数据预处理和共享 - 一次序列化，多次使用
+
+    # Share data once for all tasks - single serialization for multiple uses
     shared_data_ref = ray.put(tokenized_sequences)
 
-    # 2. 批量任务参数准备
+    # Prepare batch task parameters
     task_params = [
         (shared_data_ref, i * curriculum_rollout_n, (i + 1) * curriculum_rollout_n)
         for i in range(batch_size)
     ]
-    
-    # 3. 分块批量提交（避免调度器过载）
-    chunk_size = min(100, batch_size)  # 动态调整chunk大小
+
+    # Submit in chunks to avoid scheduler overload
+    chunk_size = min(100, batch_size)  # Dynamically adjust chunk size
     all_futures = []
     
     for i in range(0, len(task_params), chunk_size):
         chunk = task_params[i:i+chunk_size]
         
-        # 批量创建这个chunk的任务
+        # Create tasks for this chunk in batch
         chunk_futures = [
             calculate_single_edit_distance.remote(data_ref, start_idx, end_idx)
             for data_ref, start_idx, end_idx in chunk
@@ -764,7 +749,7 @@ def calculate_edit_distance_metric(responses, batch_size, curriculum_rollout_n):
         
         all_futures.extend(chunk_futures)
     
-    # 4. 批量收集结果
+    # Collect all results in batch
     edit_scores = ray.get(all_futures)
     return torch.tensor(edit_scores, dtype=torch.float32)
 
@@ -825,9 +810,6 @@ class RayPPOTrainer:
         else:
             self.use_reference_policy = False
             self.kl_ctrl = core_algos.FixedKLController(init_kl_coef=0.0)
-            print(
-                "KL is disabled, no KL metrics will be logged. Please set `kl_coef=0` to log KL metrics."
-            )
 
         if config.algorithm.adv_estimator == AdvantageEstimator.GAE:
             self.use_critic = True
@@ -894,16 +876,11 @@ class RayPPOTrainer:
             curriculum_state = self._load_curriculum_state()
 
             # Load or compute curriculum weights
-            # print(f"DEBUG: always compute curriculum weights")
             if curriculum_state is not None:
                 self.train_dataset.curriculum_weights = curriculum_state[
                     "curriculum_weights"
                 ]
-                print(
-                    f"Loaded curriculum weights to self.train_dataset.curriculum_weights"
-                )
             else:
-                print("No curriculum state found, will compute curriculum weights")
                 self._update_curriculum_weights()
 
             # Initialize curriculum sampler (After self.train_dataset.curriculum_weights is initialized)
@@ -923,10 +900,6 @@ class RayPPOTrainer:
                 )
 
             self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
-
-            assert (
-                self.train_dataset.curriculum_weights is not None
-            ), "curriculum_weights should be initialized"
 
         elif self.config.data.sampling_strategy == "shuffle":
             train_dataloader_generator = torch.Generator()
@@ -980,8 +953,6 @@ class RayPPOTrainer:
 
         assert len(self.train_dataloader) >= 1
         assert len(self.val_dataloader) >= 1
-        print(f"Size of train dataloader: {len(self.train_dataloader)}")
-        print(f"Size of val dataloader: {len(self.val_dataloader)}")
 
         if self.config.trainer.max_steps is not None:
             training_steps = self.config.trainer.max_steps
@@ -993,7 +964,6 @@ class RayPPOTrainer:
         self.training_steps = training_steps
         self.config.worker.actor.optim.training_steps = training_steps
         self.config.worker.critic.optim.training_steps = training_steps
-        print(f"Total training steps: {self.training_steps}")
 
     def _calculate_curriculum_metric(
         self, dataset: RLHFDataset, indices: List[int]
@@ -1004,12 +974,12 @@ class RayPPOTrainer:
             A list containing futures for the remote metric calculations.
         """
 
-        # --- Prepare gen batch - extract data on driver to preserve memory mapping ---
+        # Prepare gen batch
         batch_data = collate_fn([dataset[i] for i in indices])
         batch = DataProto.from_single_dict(batch_data)
         batch_size = len(indices)
 
-        # Generate responses for the batch - this has to be done sequentially
+        # Generate responses for the batch
         if "multi_modal_inputs" in batch.non_tensor_batch.keys():
             gen_batch = batch.pop(
                 batch_keys=["input_ids", "attention_mask", "position_ids"],
@@ -1025,12 +995,12 @@ class RayPPOTrainer:
                 non_tensor_batch_keys=["raw_prompt_ids"],
             )
 
-        # --- Generate responses ---
+        # Generate responses
         gen_batch.meta_info["n"] = self.config.data.curriculum_rollout_n
         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
         gen_batch.meta_info.pop("n")
 
-        # --- Submit future for remote metric calculations ---
+        # Submit futures for remote metric calculations
         metric_futures = []
 
         for metric_name in self.config.data.curriculum_metrics:
@@ -1077,7 +1047,7 @@ class RayPPOTrainer:
         batch = DataProto.from_single_dict(batch_data)
         batch_size = len(batch)
 
-        # Generate responses for the batch - this has to be done sequentially
+        # Generate responses for the batch
         if "multi_modal_inputs" in batch.non_tensor_batch.keys():
             gen_batch = batch.pop(
                 batch_keys=["input_ids", "attention_mask", "position_ids"],
@@ -1093,12 +1063,12 @@ class RayPPOTrainer:
                 non_tensor_batch_keys=["raw_prompt_ids"],
             )
 
-        # --- Generate responses ---
+        # Generate responses
         gen_batch.meta_info["n"] = self.config.data.curriculum_rollout_n
         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
         gen_batch.meta_info.pop("n")
 
-        # --- Submit future for remote metric calculations ---
+        # Submit futures for remote metric calculations
         metric_futures = []
 
         for metric_name in self.config.data.curriculum_metrics:
@@ -1154,18 +1124,16 @@ class RayPPOTrainer:
 
         # Save weights
         torch.save(weights, weights_path)
-        print(f"Saved curriculum weights to {weights_path}")
 
     def _compute_curriculum_weights(self) -> torch.Tensor:
         """Compute curriculum weights for each sample in the dataset using dataloader for efficient loading."""
 
         curriculum_weights = torch.zeros(len(self.train_dataset), dtype=torch.float32)
         
-        # Put reward_fn into Ray object store once to avoid repeated serialization
+        # Put reward_fn into Ray object store once
         reward_fn_ref = ray.put(self.reward_fn)
 
         # Create a temporary dataloader with padded sequential sampling
-        # Use PaddedSequentialSampler to ensure all batches have consistent size
         padded_sampler = PaddedSequentialSampler(
             dataset=self.train_dataset,
             batch_size=self.config.data.curriculum_rollout_batch_size
@@ -1184,7 +1152,6 @@ class RayPPOTrainer:
         # Process batches sequentially but don't wait for metric calculations
         metric_futures_with_batch_idx = []  # Store (batch_idx, futures_dict) tuples
 
-        print("Generating sequences and launching metric calculations...")
         for batch_idx, batch_data in enumerate(curriculum_dataloader):
             # Calculate metrics using pre-loaded batch_data
             metric_futures_cur_batch = self._calculate_curriculum_metric_with_batch(
@@ -1194,10 +1161,6 @@ class RayPPOTrainer:
 
             # Store batch index and futures for later collection
             metric_futures_with_batch_idx.append((batch_idx, metric_futures_cur_batch))
-
-            print(
-                f"Launched {len(metric_futures_cur_batch)} metric calculations for batch {batch_idx}"
-            )
 
         # Now process all the pending futures
         for batch_idx, futures in metric_futures_with_batch_idx:
@@ -1222,13 +1185,6 @@ class RayPPOTrainer:
             valid_samples = end_idx - start_idx
             curriculum_weights[start_idx:end_idx] = combined_metric.detach()[:valid_samples]
 
-            # Log progress
-            print(
-                f"Processed metrics for {batch_idx + 1}/{len(metric_futures_with_batch_idx)} batches"
-            )
-
-        print(f"DEBUG: succesful! curriculum weights shape: {curriculum_weights.shape}")
-
         # Normalize weights using min-max scaling
         min_weight = curriculum_weights.min()
         max_weight = curriculum_weights.max()
@@ -1242,7 +1198,6 @@ class RayPPOTrainer:
 
     def _update_curriculum_weights(self) -> None:
         """Update curriculum learning weights based on current model performance."""
-        print(f"Updating curriculum weights at step {self.global_step}...")
         # Create a temporary dataloader for weight estimation
         new_weights = self._compute_curriculum_weights()
 
@@ -1261,12 +1216,6 @@ class RayPPOTrainer:
         self._save_curriculum_weights(
             self.train_dataset.curriculum_weights, step=self.global_step
         )
-
-        # self.curriculum_sampler.update_weights(self.train_dataset.curriculum_weights)
-
-        # Update dataloader iterator for current epoch
-        # self.dataloader_iterator = iter(self.train_dataloader)
-    
 
     def _maybe_log_val_generations(
         self, inputs: List[str], outputs: List[str], scores: List[float]
@@ -1326,7 +1275,6 @@ class RayPPOTrainer:
             test_output_gen_batch = unpad_dataproto(
                 test_output_gen_batch, pad_size=pad_size
             )
-            print("validation generation end")
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
@@ -1598,7 +1546,6 @@ class RayPPOTrainer:
             }
             curriculum_path = os.path.join(folder_path, "curriculum_state.pt")
             torch.save(curriculum_state, curriculum_path)
-            print(f"Saved curriculum state to {curriculum_path}")
 
         last_global_step_path = os.path.join(
             self.config.trainer.save_checkpoint_path, CHECKPOINT_TRACKER
@@ -1610,9 +1557,6 @@ class RayPPOTrainer:
         if self.config.trainer.load_checkpoint_path is not None:
             return None
         if not os.path.exists(self.config.trainer.save_checkpoint_path):
-            print(
-                f"No checkpoint found at {self.config.trainer.save_checkpoint_path}, will start from scratch."
-            )
             return None
 
         ckpt_list = [
@@ -1621,18 +1565,13 @@ class RayPPOTrainer:
             if _.startswith("global_step_")
         ]
         if len(ckpt_list) == 0:
-            print(
-                f"No checkpoint found at {self.config.trainer.save_checkpoint_path}, will start from scratch."
-            )
             return None
 
         ckpt_list.sort(key=lambda x: int(x.split("global_step_")[-1]))
         return os.path.join(self.config.trainer.save_checkpoint_path, ckpt_list[-1])
 
     def _load_curriculum_state(self) -> bool:
-        """Load curriculum state from checkpoint, set self.curriculum_weights and sampler state
-        Must be called after self.train_dataset, self.curriculum_sampler is initialized
-        """
+        """Load curriculum state from checkpoint."""
         if self.checkpoint_path is None:
             return None
 
@@ -1641,9 +1580,6 @@ class RayPPOTrainer:
             curriculum_state = torch.load(curriculum_path, weights_only=False)
             return curriculum_state
         else:
-            print(
-                f"No curriculum state found at {curriculum_path}, will initialize from scratch."
-            )
             return None
 
     def _load_dataloader_state(self) -> None:
@@ -1654,20 +1590,14 @@ class RayPPOTrainer:
         if os.path.exists(dataloader_path):
             dataloader_state_dict = torch.load(dataloader_path, weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
-        else:
-            print(
-                f"No dataloader state found at {dataloader_path}, will start from scratch."
-            )
 
     def _load_worker_state(self) -> None:
         if self.checkpoint_path is None:
             return
 
-        print(f"Load from checkpoint: {self.checkpoint_path}.")
         self.global_step = int(
             self.checkpoint_path.strip(os.path.sep).split("global_step_")[-1]
         )
-        print(f"Set global_step to {self.global_step}")
 
         actor_path = os.path.join(self.checkpoint_path, "actor")
         self.actor_rollout_wg.load_checkpoint(actor_path)
@@ -1725,9 +1655,6 @@ class RayPPOTrainer:
             # Reset cached indices to ensure new indices are generated with the correct random position
             if self.config.data.sampling_strategy == "curriculum":
                 self.curriculum_sampler.cached_mixed_indices = None
-                print(
-                    f"Reset cached indices for epoch {epoch}, random position: {self.curriculum_sampler.get_training_random_position()}"
-                )
 
             # Create a new iterator for each epoch
             self.dataloader_iterator = iter(self.train_dataloader)
@@ -1743,7 +1670,6 @@ class RayPPOTrainer:
 
                     metrics, timing_raw = {}, {}
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
-                    # breakpoint()
                     # pop those keys for generation
                     if "multi_modal_inputs" in batch.non_tensor_batch.keys():
                         gen_batch = batch.pop(
@@ -2020,8 +1946,6 @@ class RayPPOTrainer:
             ):
                 val_metrics = self._validate()
                 self.logger.log(data=val_metrics, step=self.global_step)
-
-            print(f"Final validation metrics: {convert_dict_to_str(val_metrics)}")
 
         if (
             self.config.trainer.save_freq <= 0
