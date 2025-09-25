@@ -21,7 +21,7 @@ MMR1: Enhancing Multimodal Reasoning with Variance-Aware Sampling and Open Resou
 </h5> 
 
 ## 📰 News
-* **[2025.09.25]**  🔥🔥 Release [technical report](report.pdf)!
+* **[2025.09.25]**  🔥🔥 Release [technical report](assets/report.pdf)!
 * **[2025.09.25]**  🚀🚀 Release MMR1-SFT (~16M) and MMR1-RL (15k) datasets!
 * **[2025.09.25]**  🚀🚀 Release MMR1-3B and MMR1-7B, 32B checkpoint are on the way!
 * **[2025.03.11]**  🔥🔥 Release MMR1-Math-v0-7B, achieving SOTA with only **6k public training data**!
