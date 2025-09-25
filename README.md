@@ -52,7 +52,7 @@ Please refer to our [TRAIN.MD](TRAIN.MD) for detailed instructions on training w
 Our method introduces **Variance-Aware Sampling (VAS)** to address the *gradient vanishing problem* in reinforcement learning with Group Relative Policy Optimization (GRPO).  
 
 <p align="center">
-<img src="assets/fig1.png" alt="Overview of the VAS framework" width="800"/>
+<img src="assets/fig1.png" alt="Overview of the VAS framework" width="700"/>
 </p>
 
 ### 🔹 Framework  
@@ -65,7 +65,7 @@ As illustrated in **Figure 1**, training begins with a pool of prompts from the 
 This design ensures that training consistently focuses on prompts that provide strong learning signals, while still maintaining sufficient randomness for coverage.  
 
 <p align="center">
-<img src="assets/algo1.png" alt="algo" width="800"/>
+<img src="assets/algo1.png" alt="algo" width="700"/>
 </p>
 
 ### 🔹 Algorithm  
@@ -87,7 +87,7 @@ We release the following resources for the community:
 - [![hf_checkpoint](https://img.shields.io/badge/🤗-Checkpoints-9C276A.svg)](https://huggingface.co/MMR1/MMR1-32B)**MMR1-32B:** 32B checkpoint trained with MMR1-SFT and MMR1-RL
 
 <p align="center">
-<img src="assets/data.png" alt="data" width="800"/>
+<img src="assets/data.png" alt="data" width="700"/>
 </p>
 
 The dataset spans diverse domains—including mathematics, science, charts/figures, document tables, and general understanding—covering ~1.6M math samples and an additional ~37K samples across other domains. It integrates existing public resources (e.g., MathVerse, ScienceQA, ChartQA, DocVQA, GQA) together with newly curated and self-collected data, ensuring quality, difficulty, and diversity. This collection establishes one of the most comprehensive open resources for multimodal reasoning models.
@@ -98,7 +98,7 @@ We hope these resources can serve as a benchmark for the community and facilitat
 We evaluate our models on a suite of **mathematics-related multimodal reasoning benchmarks** (MathVerse, MathVista, MathVision, LogicVista, and ChartQA).  
 
 <p align="center">
-<img src="assets/result.png" alt="result" width="800"/>
+<img src="assets/result.png" alt="result" width="700"/>
 </p>
 
 - **MMR1-7B** achieves an average score of **58.4**, establishing new state-of-the-art performance among 7B-scale reasoning models.  
@@ -110,7 +110,7 @@ We evaluate our models on a suite of **mathematics-related multimodal reasoning 
 We further analyze the effectiveness of **Variance-Aware Sampling (VAS)** through training efficiency and the evolution of **Variance Promotion Score (VPS)**.  
 
 <p align="center">
-<img src="assets/anal1.png" alt="anal1" width="800"/>
+<img src="assets/anal1.png" alt="anal1" width="700"/>
 </p>    
 
 **Training Efficiency (Fig. 2).**  
@@ -118,7 +118,9 @@ We further analyze the effectiveness of **Variance-Aware Sampling (VAS)** throug
 - **Clip fraction**: Higher clipping fractions in VAS runs suggest that policy updates are closer to the trust-region boundary, enabling more effective utilization of the learning signal without destabilizing training.  
 - **Validation accuracy**: Both full VAS (λ = 1.0) and mixed VAS–random sampling (λ = 0.5) converge faster and achieve higher final accuracy than the baseline, demonstrating that VAS improves both efficiency and performance. Notably, the mixed strategy achieves competitive results while maintaining broader data coverage.  
 
-<img src="assets/anal2.png" alt="anal2" width="600"/>
+<p align="center">
+<img src="assets/anal2.png" alt="anal2" width="700"/>
+</p>
 
 **VPS Dynamics (Fig. 3).**  
 - **Score distribution**: VPS distributions evolve from relatively uniform at the beginning of training to more concentrated in the middle bins, suggesting convergence in identifying consistently informative prompts.  
@@ -133,7 +135,7 @@ To illustrate the reasoning capability of our models, we provide qualitative exa
 The demo showcases how the model carefully analyzes the problem, plans a structured solution, executes step-by-step reasoning, verifies results, and even provides alternative solution paths.  
 
 <p align="center">
-<img src="assets/demo.png" alt="demo" width="800"/>
+<img src="assets/demo.png" alt="demo" width="700"/>
 </p>
 
 This demonstrates the model’s ability to maintain logical consistency, perform reflective verification, and present human-readable reasoning traces.
