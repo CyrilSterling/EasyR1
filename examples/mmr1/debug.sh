@@ -39,6 +39,7 @@ WORKDIR=$PWD/EasyR1
 
 # Run the main training script directly
 cd $WORKDIR
+export VENV=/mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/rl/.venv
 python -m verl.trainer.main \
   config=$WORKDIR/examples/mmr1_b200.yaml \
   data.system_prompt="${SYSTEM_PROMPT}" \

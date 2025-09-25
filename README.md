@@ -1,6 +1,6 @@
 # MMR1 Curriculum Learning
 
-This guide provides comprehensive instructions for reproduce curriculum learning strategies in MMR1, including advanced sampling techniques for RLHF training.
+This guide provides comprehensive instructions for reproduce curriculum learning strategies in MMR1.
 
 ## Overview
 
@@ -41,10 +41,8 @@ bash examples/mmr1/train_qwen2_5_vl_3b.sh \
 
 ### Available Metrics
 
-- **learnability**: Measures sample difficulty based on model performance
-- **distinct**: N-gram diversity in generated responses
+- **learnability**: Measures sample difficulty based on model performance. Given the accuracy p, we define the learnability here as p(1-p)
 - **self-bleu**: Similarity between generated responses
-- **edit-distance**: Pairwise edit distance between responses
 
 ### Key Parameters
 
@@ -171,29 +169,3 @@ Track these metrics in wandb/tensorboard:
 - `curriculum/min_weight`, `curriculum/max_weight`: Weight range
 - `curriculum/consumed_batches`: Training progress
 - `curriculum/random_position`: Mix of weighted vs random samples
-
-## Resume from Checkpoint
-
-Curriculum weights and sampler state are automatically saved:
-
-```bash
-trainer.load_checkpoint_path=/checkpoints/previous_run/global_step_100 \
-trainer.save_checkpoint_path=/checkpoints/continued_run
-```
-
-## Troubleshooting
-
-### Issue: Weights not updating
-- Check `curriculum_update_freq` is set appropriately
-- Verify metrics are being calculated (check logs)
-- Ensure `curriculum_rollout_batch_size` is reasonable
-
-### Issue: Training instability
-- Reduce `curriculum_mixture_ratio` for more randomness
-- Increase `curriculum_momentum` for smoother updates
-- Use fewer or simpler metrics
-
-### Issue: Slow metric computation
-- Reduce `curriculum_rollout_n`
-- Increase `curriculum_rollout_batch_size`
-- Use fewer metrics or simpler metrics (e.g., just learnability)

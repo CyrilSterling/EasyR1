@@ -20,7 +20,7 @@ import sys
 import torch
 import numpy as np
 import random
-
+import os
 import ray
 from omegaconf import OmegaConf
 
@@ -56,7 +56,7 @@ class Runner:
 
         # define worker classes
         ray_worker_group_cls = RayWorkerGroup
-        
+
         # Configure fault tolerance based on config
         if config.fault_tolerance.enable_fault_tolerance:
             role_worker_mapping = {
@@ -156,22 +156,21 @@ def main():
 
     if not ray.is_initialized():
         # this is for local ray cluster
-        ray.init(
-            runtime_env={
-                "env_vars": {
-                    "TOKENIZERS_PARALLELISM": "true",
-                    "NCCL_DEBUG": "INFO",
-                    "VLLM_LOGGING_LEVEL": "INFO",
-                    "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
-                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
-                    # "HF_HUB_CACHE": "/mnt/amlfs-02/shared/ckpts/mmn/",
-                    # "HF_HUB_OFFLINE": "1",
-                    # "WANDB_API_KEY": "26dcd5fab9afa1c6f127a04db6e0af6521affbbb",
-                    # "WANDB_ENTITY": "mmo1",
-                    # "PATH": "/mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/rl/.venv/bin:$PATH",
-                }
-            }
-        )
+        venv = os.getenv("VENV")
+        runtime_env = {}
+        runtime_env["env_vars"] = {
+            "TOKENIZERS_PARALLELISM": "true",
+            "NCCL_DEBUG": "INFO",
+            "VLLM_LOGGING_LEVEL": "INFO",
+            "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
+            "RAY_ENABLE_RECORD_ACTOR_TASK_LOGGING": "1",
+        }
+        if venv:
+            runtime_env["env_vars"]["PATH"] = f"{venv}/bin:$PATH"
+            runtime_env["py_executables"] = f"{venv}/bin/python"
+
+        ray.init(runtime_env=runtime_env)
 
     runner = Runner.remote()
     ray.get(runner.run.remote(ppo_config))
