@@ -224,40 +224,6 @@ def get_available_port():
     return None
 
 
-def portforward_worker(workflow_id, local_port, target_port):
-    osmo_exec = "/mnt/amlfs-01/home/jingwang/osmo/osmo-cli/osmo-cli"
-    subprocess.run(
-        f"{osmo_exec} port-forward {workflow_id} --port {local_port}:{target_port}",
-        shell=True,
-    )
-
-
-class PortForwarder:
-    def __enter__(self, workflow_id, target_ports: List[str]):
-        self.local_ports = [get_available_port() for _ in target_ports]
-        self.processes = [
-            mp.Process(
-                target=portforward_worker, args=(workflow_id, local_port, target_port)
-            )
-            for local_port, target_port in zip(self.local_ports, target_ports)
-        ]
-        for process in self.processes:
-            process.start()
-        print(
-            f"Port forwarder started for workflow {workflow_id} on port {self.local_port}"
-        )
-
-    @property
-    def endpoints(self):
-        return [f"http://localhost:{local_port}" for local_port in self.local_ports]
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.process.terminate()
-        print(
-            f"Port forwarder for workflow {self.workflow_id} on port {self.local_port} terminated"
-        )
-
-
 def accuracy_reward_batch_vllm(
     predict_strs, ground_truths, prompt_strs, response_length, **kwargs
 ):
@@ -316,7 +282,7 @@ def accuracy_reward_batch_vllm(
     # use judge_ip:port
     if "judge_ip" in base_urls[0]:
         assert workflow_id is not None, "workflow_id is required when using judge_ip"
-        ip_cache_path = f"/mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/judge_ips/{workflow_id}"
+        ip_cache_path = f"$HOME/PROJECTS/mmo1/judge_ips/{workflow_id}"
         assert osp.exists(ip_cache_path), f"judge_ip file {workflow_id} does not exist"
         judge_ip = (
             open(ip_cache_path)

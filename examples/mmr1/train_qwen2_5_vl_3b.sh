@@ -35,12 +35,12 @@ i.e., <think> reasoning process here, with potential reflections and corrections
 <answer> final answer here, with the key result enclosed in \boxed{} </answer>."""
 
 # Go to working directory (change if needed)
-WORKDIR=$PWD/EasyR1
+WORKDIR=$PWD
 
 # Run the main training script directly
 cd $WORKDIR
 python -m verl.trainer.main \
-  config=$WORKDIR/examples/mmr1_b200.yaml \
+  config=$WORKDIR/examples/mmr1.yaml \
   data.system_prompt="${SYSTEM_PROMPT}" \
   worker.actor.model.model_path=${MODEL_PATH} \
   trainer.experiment_name=${JOB_NAME} \
