@@ -47,7 +47,7 @@ This repo introduces our work on enhancing multimodal reasoning models. Current 
   - Fully reproducible end-to-end training pipeline  
   - Released models at multiple scales as standardized baselines for multimodal reasoning  
 
-Please refer to our [TRAIN.MD](TRAIN.MD) for detailed instructions on training with VAS.
+Please refer to our [TRAIN.md](TRAIN.md) for detailed instructions on training with VAS.
 
 ## 💡 Methodology Overview
 Our method introduces **Variance-Aware Sampling (VAS)** to address the *gradient vanishing problem* in reinforcement learning with Group Relative Policy Optimization (GRPO).  

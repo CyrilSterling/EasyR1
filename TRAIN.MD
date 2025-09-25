@@ -64,21 +64,15 @@ trainer.total_episodes=10
 
 ### Key Parameters
 
-| Parameter | Description | Default |
+| Parameter               | Description                                | Default  |
+|--------------------------|--------------------------------------------|----------|
+| `curriculum_metrics`     | List of metrics for weighting              | `[learnability]` |
+| `curriculum_metric_weights` | Weights for combining metrics            | `[1.0]`  |
+| `curriculum_mixture_ratio`  | Ratio of weighted vs random sampling (0.0–1.0) | `0.5`    |
+| `curriculum_update_freq` | Update weights every N steps (0 for epoch-level) | `4`      |
+| `curriculum_rollout_n`   | Number of rollouts for metric calculation | `8`      |
+| `curriculum_momentum`    | Momentum for weight updates               | `0.0`    |
 
-|-----------|-------------|---------|
-
-| `curriculum_metrics` | List of metrics for weighting | `[learnability]` |
-
-| `curriculum_metric_weights` | Weights for combining metrics | `[1.0]` |
-
-| `curriculum_mixture_ratio` | Ratio of weighted vs random sampling (0.0-1.0) | `0.5` |
-
-| `curriculum_update_freq` | Update weights every N steps (0 for epoch-level) | `4` |
-
-| `curriculum_rollout_n` | Number of rollouts for metric calculation | `8` |
-
-| `curriculum_momentum` | Momentum for weight updates | `0.0` |
 
 ## Advanced Examples
 
@@ -155,44 +149,13 @@ python-mverl.trainer.mainconfig=custom_curriculum.yaml
 
 ```
 
-## Mixture Ratio Guidelines
-
-The `curriculum_mixture_ratio` controls the balance between weighted and random sampling:
-
-| Ratio | Effect | Use Case |
-
-|-------|--------|----------|
-
-| 0.0 | Fully random | Equivalent to shuffle strategy |
-
-| 0.2 | 20% weighted, 80% random | Light variance-aware sampling influence |
-
-| 0.5 | Balanced | Good starting point |
-
-| 0.8 | 80% weighted, 20% random | Strong variance-aware sampling focus |
-
-| 1.0 | Fully weighted | Pure variance-aware sampling |
-
-## Update Frequency Strategies
-
-| Setting | Behavior | Best For |
-
-|---------|----------|----------|
-
-| 0 | Epoch-level updates | Small datasets |
-
-| 4 | Every 4 steps | Balanced approach |
-
-| 8-10 | Less frequent | Large datasets |
-
-| 20+ | Infrequent | Stable training |
-
 
 ### For Quick Experimentation
 
 - Start with single metric: `'data.curriculum_metrics=[learnability]'`
 - Use `curriculum_mixture_ratio=0.5` as baseline
 - Set `curriculum_rollout_n=4` for faster iteration
+
 
 ## Monitoring Curriculum Learning
 
