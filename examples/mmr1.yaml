@@ -4,11 +4,10 @@ data:
   prompt_key: problem
   answer_key: answer
   image_key: images
-  # 可以观测一下wandb里的prompt clip ratio来觉得要不要提高
   max_prompt_length: 2048
 
   max_response_length: 8192
-  rollout_batch_size: 512
+  rollout_batch_size: 512 # increased from 512
   # rollout_micro_batch_size: 128
 
   val_batch_size: -1
@@ -25,7 +24,7 @@ data:
   curriculum_update_freq: 4  # Update curriculum weights every N steps (0 means epoch-level updates)
   curriculum_mixture_ratio: 0.5  # Ratio of weighted samples in each batch (0.0 to 1.0)
   curriculum_rollout_n: 8  # Number of rollouts to generate for each prompt
-  curriculum_rollout_batch_size: 4096
+  curriculum_rollout_batch_size: 512 # increased from 4096
 
 algorithm:
   adv_estimator: grpo
@@ -36,9 +35,9 @@ algorithm:
 
 worker:
   actor:
-    global_batch_size: 128
-    micro_batch_size_per_device_for_update: 1
-    micro_batch_size_per_device_for_experience: 4
+    global_batch_size: 512 # increased from 128
+    micro_batch_size_per_device_for_update: 8 # increased from 1
+    micro_batch_size_per_device_for_experience: 64 # increased from 4
     max_grad_norm: 1.0
     padding_free: true
     ulysses_sequence_parallel_size: 1
@@ -64,7 +63,7 @@ worker:
   rollout:
     temperature: 0.6
     n: 8
-    gpu_memory_utilization: 0.6
+    gpu_memory_utilization: 0.75
     enforce_eager: false
     enable_chunked_prefill: false
     tensor_parallel_size: 1
@@ -72,7 +71,7 @@ worker:
     val_override_config:
       temperature: 0.5
       n: 1
-    max_num_batched_tokens: 32768
+    max_num_batched_tokens: 196608 # increased from 32768
 
   ref:
     fsdp:
@@ -93,13 +92,13 @@ worker:
       max_value_correct: 0.0
 
 trainer:
-  total_episodes: 15
+  total_episodes: 10
   logger: ["console", "wandb"]
-  project_name: easy_r1
+  project_name: easyr1
   experiment_name: default # use your own experiment name
   n_gpus_per_node: 8
-  nnodes: 8
-  val_freq: 5  # -1 to disable
+  nnodes: 1
+  val_freq: 4  # -1 to disable
   val_before_train: true # set to true when real train
   val_only: false
   val_generations_to_log: 10

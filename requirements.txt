@@ -15,7 +15,7 @@ ray[default]
 tensordict
 torchdata
 transformers==4.51.2
-vllm>=0.7.3
+vllm==0.8.4
 wandb
 tenacity
 math_verify
@@ -23,3 +23,4 @@ jieba
 nltk
 Levenshtein
 tensorboard
+torch==2.6.0

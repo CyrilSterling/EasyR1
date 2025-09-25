@@ -35,18 +35,13 @@ i.e., <think> reasoning process here, with potential reflections and corrections
 <answer> final answer here, with the key result enclosed in \boxed{} </answer>."""
 
 # Go to working directory (change if needed)
-WORKDIR=$PWD
+WORKDIR=$PWD/EasyR1
 
 # Run the main training script directly
 cd $WORKDIR
-source /mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/rl/.venv/bin/activate
-export VENV=/mnt/amlfs-01/home/jingwang/PROJECTS/mmo1/rl/.venv
-
 python -m verl.trainer.main \
-  config=$WORKDIR/examples/mmr1.yaml \
+  config=$WORKDIR/examples/mmr1_b200.yaml \
   data.system_prompt="${SYSTEM_PROMPT}" \
-  data.train_files=mm-o1/math_vista_val \
-  data.val_files=mm-o1/math_vista_val \
   worker.actor.model.model_path=${MODEL_PATH} \
   trainer.experiment_name=${JOB_NAME} \
   $@

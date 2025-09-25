@@ -21,9 +21,6 @@ import torch
 import numpy as np
 import random
 
-
-print(f"sys.executable: {sys.executable}")
-
 import ray
 from omegaconf import OmegaConf
 

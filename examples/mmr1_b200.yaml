@@ -4,7 +4,6 @@ data:
   prompt_key: problem
   answer_key: answer
   image_key: images
-  # 可以观测一下wandb里的prompt clip ratio来觉得要不要提高
   max_prompt_length: 2048
 
   max_response_length: 8192
@@ -95,7 +94,7 @@ worker:
 trainer:
   total_episodes: 10
   logger: ["console", "wandb"]
-  project_name: easyr1_jx
+  project_name: easyr1
   experiment_name: default # use your own experiment name
   n_gpus_per_node: 8
   nnodes: 1
