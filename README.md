@@ -51,8 +51,9 @@ Please refer to our [TRAIN.MD](TRAIN.MD) for detailed instructions on training w
 ## 💡 Methodology Overview
 Our method introduces **Variance-Aware Sampling (VAS)** to address the *gradient vanishing problem* in reinforcement learning with Group Relative Policy Optimization (GRPO).  
 
-<img src="assets/fig1.png" alt="Overview of the VAS framework" width="600"/>
-
+<p align="center">
+<img src="assets/fig1.png" alt="Overview of the VAS framework" width="800"/>
+</p>
 
 ### 🔹 Framework  
 As illustrated in **Figure 1**, training begins with a pool of prompts from the dataset:  
@@ -63,8 +64,9 @@ As illustrated in **Figure 1**, training begins with a pool of prompts from the 
 
 This design ensures that training consistently focuses on prompts that provide strong learning signals, while still maintaining sufficient randomness for coverage.  
 
-<img src="assets/algo1.png" alt="algo" width="600"/>
-
+<p align="center">
+<img src="assets/algo1.png" alt="algo" width="800"/>
+</p>
 
 ### 🔹 Algorithm  
 **Algorithm 1** provides a step-by-step description of VAS within the GRPO framework:  
@@ -84,7 +86,9 @@ We release the following resources for the community:
 - [![hf_checkpoint](https://img.shields.io/badge/🤗-Checkpoints-9C276A.svg)](https://huggingface.co/MMR1/MMR1-7B)**MMR1-7B:** 7B checkpoint trained with MMR1-SFT and MMR1-RL
 - [![hf_checkpoint](https://img.shields.io/badge/🤗-Checkpoints-9C276A.svg)](https://huggingface.co/MMR1/MMR1-32B)**MMR1-32B:** 32B checkpoint trained with MMR1-SFT and MMR1-RL
 
-<img src="assets/data.png" alt="data" width="600"/>
+<p align="center">
+<img src="assets/data.png" alt="data" width="800"/>
+</p>
 
 The dataset spans diverse domains—including mathematics, science, charts/figures, document tables, and general understanding—covering ~1.6M math samples and an additional ~37K samples across other domains. It integrates existing public resources (e.g., MathVerse, ScienceQA, ChartQA, DocVQA, GQA) together with newly curated and self-collected data, ensuring quality, difficulty, and diversity. This collection establishes one of the most comprehensive open resources for multimodal reasoning models.
 We hope these resources can serve as a benchmark for the community and facilitate the research of multimodal reasoning.
@@ -93,7 +97,9 @@ We hope these resources can serve as a benchmark for the community and facilitat
 
 We evaluate our models on a suite of **mathematics-related multimodal reasoning benchmarks** (MathVerse, MathVista, MathVision, LogicVista, and ChartQA).  
 
-<img src="assets/result.png" alt="result" width="600"/>
+<p align="center">
+<img src="assets/result.png" alt="result" width="800"/>
+</p>
 
 - **MMR1-7B** achieves an average score of **58.4**, establishing new state-of-the-art performance among 7B-scale reasoning models.  
 - **MMR1-3B** performs competitively with **52.7**, showing strong reasoning ability even at smaller scale.  
@@ -103,7 +109,9 @@ We evaluate our models on a suite of **mathematics-related multimodal reasoning 
 
 We further analyze the effectiveness of **Variance-Aware Sampling (VAS)** through training efficiency and the evolution of **Variance Promotion Score (VPS)**.  
 
-<img src="assets/anal1.png" alt="anal1" width="600"/>
+<p align="center">
+<img src="assets/anal1.png" alt="anal1" width="800"/>
+</p>    
 
 **Training Efficiency (Fig. 2).**  
 - **Gradient norm**: VAS substantially amplifies gradient magnitudes compared to the vanilla baseline, mitigating the gradient vanishing issue. This indicates that VAS consistently provides stronger optimization signals.  
@@ -124,7 +132,9 @@ We further analyze the effectiveness of **Variance-Aware Sampling (VAS)** throug
 To illustrate the reasoning capability of our models, we provide qualitative examples from **MathVerse**.  
 The demo showcases how the model carefully analyzes the problem, plans a structured solution, executes step-by-step reasoning, verifies results, and even provides alternative solution paths.  
 
-<img src="assets/demo.png" alt="demo" width="600"/>
+<p align="center">
+<img src="assets/demo.png" alt="demo" width="800"/>
+</p>
 
 This demonstrates the model’s ability to maintain logical consistency, perform reflective verification, and present human-readable reasoning traces.
 
